@@ -365,11 +365,21 @@ static NSString *const APLDiagnoseButtonTitle = @"检查并重建注入名单";
     [super viewDidLoad];
     myTableView = [self table];
 
+    UIBarButtonItem *refreshItem = [[UIBarButtonItem alloc] initWithTitle:@"刷新应用"
+                                                                  style:UIBarButtonItemStylePlain
+                                                                 target:self
+                                                                 action:@selector(refreshAppsPressed:)];
     UIBarButtonItem *respringItem = [[UIBarButtonItem alloc] initWithTitle:@"注销"
                                                                     style:UIBarButtonItemStylePlain
                                                                    target:self
                                                                    action:@selector(respringPressed:)];
-    self.navigationItem.rightBarButtonItem = respringItem;
+    self.navigationItem.rightBarButtonItems = @[ refreshItem, respringItem ];
+}
+
+// 右上角“刷新应用”：重新扫一遍已装 App，新下载安装的会立刻出现在列表里
+-(void)refreshAppsPressed:(id)sender {
+    _specifiers = nil;
+    [self reloadSpecifiers];
 }
 
 // 右上角“注销”：直接让 SpringBoard 注销一次

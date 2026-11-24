@@ -239,13 +239,14 @@ static void APLStopSync(void) {
 
     SEL selLayouts = NSSelectorFromString(@"appLayouts");
     SEL selForLayout = NSSelectorFromString(@"_itemContainerForAppLayoutIfExists:");
+    id switcher = (id)self;
     id appLayout = nil;
-    if ([self respondsToSelector:selLayouts] && [self respondsToSelector:selForLayout]) {
+    if ([switcher respondsToSelector:selLayouts] && [switcher respondsToSelector:selForLayout]) {
         id (*msgID)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
         id (*msgID_ID)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
-        NSArray *layouts = msgID(self, selLayouts);
+        NSArray *layouts = msgID(switcher, selLayouts);
         for (id layout in layouts) {
-            if (msgID_ID(self, selForLayout, layout) == container) { appLayout = layout; break; }
+            if (msgID_ID(switcher, selForLayout, layout) == container) { appLayout = layout; break; }
         }
     }
 

@@ -1,5 +1,7 @@
 {
     Filter = {
-        Bundles = ( "com.apple.Spotlight", "com.apple.springboard", "com.adb.aimaTravel" );
+        Mode = "Any";
+        Bundles = ( "com.apple.springboard", "com.apple.Spotlight" );
+        Classes = ( "UIApplication" );
     };
 }

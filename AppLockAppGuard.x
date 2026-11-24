@@ -1,11 +1,26 @@
 #import <UIKit/UIKit.h>
+#import "Common.h"
 
 // 应用锁 —— App 自身进程内的“糊屏”
-// 只负责一件事：App 退到后台（含打开多任务界面）时，在 App 自己的窗口上盖一层毛玻璃，
-// 系统给多任务卡片拍照时拍到的就是这层糊图，卡片上看不到内容。
-// 回到前台就撤掉（验证已经在 SpringBoard 那边先做过了，见 AppLockSwitcherAuth.x）。
+// 只负责一件事：这个 App 被勾选为加锁时，退到后台（含打开多任务界面）就在它自己的窗口上盖一层毛玻璃，
+// 系统给多任务卡片拍照时拍到的就是这层糊图；回到前台就撤掉（验证已在 SpringBoard 先做过）。
+// 2.0.0：改为“全 App 注入 + 运行时读名单判断”，不再依赖改写注入名单（RootHide 下无写权限）。
 
 static UIVisualEffectView *gAPLOverlay = nil;
+
+// 总开关 + 当前 App 是否在勾选名单里
+static BOOL APLShouldProtectSelf(void) {
+    NSDictionary *masterDefaults = [[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN];
+    if (![masterDefaults[TWEAK_SPECIFIER_KEY] boolValue]) return NO;
+
+    NSDictionary *listDefaults = [[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN_IS_ENABLED];
+    NSArray *locked = listDefaults[BUNDLE_DEFAULTS_IS_ENABLED_KEY];
+    if (![locked isKindOfClass:[NSArray class]]) return NO;
+
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    if (!bundleID.length) return NO;
+    return [locked containsObject:bundleID];
+}
 
 static UIWindow *APLTopWindow(void) {
     if (@available(iOS 13.0, *)) {
@@ -31,6 +46,8 @@ static void APLRemoveOverlay(void) {
 }
 
 static void APLShowOverlay(void) {
+    if (!APLShouldProtectSelf()) return;
+
     UIWindow *window = APLTopWindow();
     if (window == nil) return;
     if (gAPLOverlay != nil) {

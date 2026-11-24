@@ -268,11 +268,6 @@ static BOOL APLRebuildFilterPlist(NSString **usedPath, NSString **errorMessage) 
         [locked removeObject:bundleID];
     }
     [self saveLockedBundleIDs:locked];
-
-    // 立刻按新名单重建注入名单文件，省得等下次注销才更新
-    NSString *usedPath = nil;
-    NSString *errorMessage = nil;
-    APLRebuildFilterPlist(&usedPath, &errorMessage);
 }
 
 //MARK: 诊断 / 重建注入名单
@@ -347,32 +342,11 @@ static NSString *const APLDiagnoseButtonTitle = @"检查并重建注入名单";
         [all addObject:passcodeSpecifier];
 
         [all addObjectsFromArray:[self appGroupWithTitle:@"用户应用"
-                                                 footer:@"勾选哪个 App，它就被加锁：桌面点开要验证，退到后台画面糊掉，多任务点回来也要验证。\n改动后需要注销设备或重新启动才生效。"
+                                                 footer:@"勾选哪个 App，它就被加锁：桌面点开要验证，退到后台画面糊掉，多任务点回来也要验证。\n勾选后立即生效；如果那个 App 正开着，先在多任务里划掉再重新打开一次。"
                                              systemApps:NO]];
         [all addObjectsFromArray:[self appGroupWithTitle:@"系统应用"
                                                  footer:nil
                                              systemApps:YES]];
-
-        PSSpecifier *diagnoseHeader = [PSSpecifier preferenceSpecifierNamed:@"注入名单"
-                                                                   target:self
-                                                                      set:nil
-                                                                      get:nil
-                                                                   detail:Nil
-                                                                     cell:PSGroupCell
-                                                                     edit:Nil];
-        [diagnoseHeader setProperty:@"改动勾选后如果没生效，点下面按钮当场重建名单，再注销设备。" forKey:@"footerText"];
-        diagnoseHeaderSpecifier = diagnoseHeader;
-        [all addObject:diagnoseHeader];
-
-        PSSpecifier *diagnoseButton = [PSSpecifier preferenceSpecifierNamed:APLDiagnoseButtonTitle
-                                                                    target:self
-                                                                       set:nil
-                                                                       get:nil
-                                                                    detail:Nil
-                                                                      cell:PSButtonCell
-                                                                      edit:Nil];
-        [diagnoseButton setProperty:@YES forKey:@"enabled"];
-        [all addObject:diagnoseButton];
 
         _specifiers = all;
     }
@@ -390,17 +364,8 @@ static NSString *const APLDiagnoseButtonTitle = @"检查并重建注入名单";
     self.navigationItem.rightBarButtonItem = respringItem;
 }
 
-// 右上角“注销”：先按当前勾选重建注入名单，再通知 SpringBoard 注销
+// 右上角“注销”：直接让 SpringBoard 注销一次
 -(void)respringPressed:(id)sender {
-    NSString *usedPath = nil;
-    NSString *errorMessage = nil;
-    BOOL rebuilt = APLRebuildFilterPlist(&usedPath, &errorMessage);
-
-    NSString *message = rebuilt
-        ? @"名单已重建，正在注销…"
-        : [NSString stringWithFormat:@"名单重建失败：%@\n仍会注销。", errorMessage ?: @"未知错误"];
-    NSLog(@"[AppLock] respring pressed: %@", message);
-
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          CFSTR("com.wfseazqw.applock17.respring"),
                                          NULL, NULL, true);

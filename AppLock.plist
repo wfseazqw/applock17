@@ -1,5 +1,5 @@
 {
     Filter = {
-        Mode = "Any";
+        Bundles = ( "com.apple.springboard", "com.apple.Spotlight", "com.apple.Preferences" );
     };
 }

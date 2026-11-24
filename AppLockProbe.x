@@ -2,8 +2,8 @@
 #import <objc/runtime.h>
 #import "Common.h"
 
-// 只读探测：不改变任何行为，只在 SpringBoard 里弹一次文本框，
-// 把「多任务切换器 / 快照 / 应用退出」相关的内部类名与方法名列出来。
+// 只读探测 2：定位「切换器点开卡片」的入口，以及「卡片快照」的处理点。
+// 不改变任何行为。
 
 static BOOL gProbeShown = NO;
 
@@ -14,7 +14,7 @@ static BOOL APLHasAny(NSString *s, NSArray *keys) {
     return NO;
 }
 
-static NSArray *APLClassNames(NSString *kw, NSUInteger limit) {
+static NSArray *APLClassNamesPrefix(NSString *prefix, NSString *kw, NSUInteger limit) {
     int count = objc_getClassList(NULL, 0);
     if (count <= 0) return @[];
     Class *classes = (Class *)malloc(sizeof(Class) * count);
@@ -22,7 +22,7 @@ static NSArray *APLClassNames(NSString *kw, NSUInteger limit) {
     NSMutableArray *out = [NSMutableArray array];
     for (int i = 0; i < count; i++) {
         NSString *name = NSStringFromClass(classes[i]);
-        if (name && [name containsString:kw]) {
+        if (name && [name hasPrefix:prefix] && [name containsString:kw]) {
             if (![out containsObject:name]) [out addObject:name];
             if (out.count >= limit) break;
         }
@@ -45,20 +45,37 @@ static NSString *APLMethodNames(NSString *clsName, NSArray *keys) {
     return [NSString stringWithFormat:@"(共%u) %@", n, out.count ? [out componentsJoinedByString:@", "] : @"无匹配"];
 }
 
+static NSString *APLSelectorOf(NSString *clsName, NSString *sel) {
+    Class c = NSClassFromString(clsName);
+    if (!c) return [NSString stringWithFormat:@"%@ 类不存在", clsName];
+    SEL s = NSSelectorFromString(sel);
+    if ([c instancesRespondToSelector:s]) return [NSString stringWithFormat:@"%@ 有实例方法 %@", clsName, sel];
+    if ([c respondsToSelector:s]) return [NSString stringWithFormat:@"%@ 只有类方法有 %@", clsName, sel];
+    return [NSString stringWithFormat:@"%@ 没有 %@", clsName, sel];
+}
+
 static NSString *APLBuildReport(void) {
     NSMutableString *t = [NSMutableString string];
 
-    [t appendString:@"【1 切换器类】\n"];
-    [t appendFormat:@"%@\n\n", [APLClassNames(@"Switcher", 14) componentsJoinedByString:@", "]];
+    [t appendString:@"【1 FluidSwitcher 类】\n"];
+    [t appendFormat:@"%@\n\n", [APLClassNamesPrefix(@"SB", @"FluidSwitcher", 16) componentsJoinedByString:@", "]];
 
-    [t appendString:@"【2 快照类】\n"];
-    [t appendFormat:@"%@\n\n", [APLClassNames(@"Snapshot", 10) componentsJoinedByString:@", "]];
+    [t appendString:@"【2 快照保存相关】\n"];
+    [t appendFormat:@"%@\n", APLSelectorOf(@"SBApplication", @"saveSuspendSnapshot:forSceneHandle:")];
+    [t appendFormat:@"%@\n", APLSelectorOf(@"SBApplication", @"suspendSnapshotForSceneHandle:")];
+    [t appendFormat:@"%@\n\n", APLMethodNames(@"SBAppSwitcherSnapshotViewState", nil)];
 
-    [t appendString:@"【3 SBApplication 关键法】\n"];
-    [t appendFormat:@"%@\n\n", APLMethodNames(@"SBApplication", @[@"kill", @"terminate", @"suspend", @"background", @"foreground", @"activate", @"processState"])];
+    [t appendString:@"【3 SBWorkspace 激活法】\n"];
+    [t appendFormat:@"%@\n\n", APLMethodNames(@"SBWorkspace", @[@"activat", @"entity", @"scene", @"transition"])];
 
-    [t appendString:@"【4 SBUIController 关键法】\n"];
-    [t appendFormat:@"%@\n", APLMethodNames(@"SBUIController", @[@"kill", @"terminate", @"activate", @"switch", @"suspend"])];
+    [t appendString:@"【4 MainWorkspace 激活法】\n"];
+    [t appendFormat:@"%@\n\n", APLMethodNames(@"SBMainWorkspace", @[@"activat", @"entity", @"scene", @"transition"])];
+
+    [t appendString:@"【5 FluidSwitcher 点按相关】\n"];
+    [t appendFormat:@"%@\n\n", APLMethodNames(@"SBFluidSwitcherViewController", @[@"tap", @"select", @"activat", @"press", @"handle", @"begin", @"app"])];
+
+    [t appendString:@"【6 AppController 相关】\n"];
+    [t appendFormat:@"%@\n", APLMethodNames(@"SBApplicationController", @[@"activat", @"foreground", @"front", @"switcher"])];
 
     return t;
 }

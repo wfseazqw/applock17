@@ -3,12 +3,23 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <dlfcn.h>
+#import "Common.h"
 
 // 应用锁 —— 多任务（App 切换器）点击卡片时的二次验证
 // 流程：点被锁卡片 → 拦住这次点选 → SpringBoard 里做面容验证 → 通过后按包名把 App 拉起来。
-// 1.8.3：验证通过后不再“重放点选动作”（切换器已退出点选状态，重放无效），改成直接启动 App。
+// 1.9.0：加锁名单改为读取设置页勾选的结果（com.applock.prefs / switchIsEnabled），不再写死单个包名。
 
-static NSString *const APLLockedBundleIdentifier = @"com.adb.aimaTravel";
+static BOOL APLMasterSwitchOn(void) {
+    NSDictionary *defaults = [[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN];
+    return [defaults[TWEAK_SPECIFIER_KEY] boolValue];
+}
+
+static NSArray *APLLockedBundleIDs(void) {
+    NSDictionary *defaults = [[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN_IS_ENABLED];
+    NSArray *locked = defaults[BUNDLE_DEFAULTS_IS_ENABLED_KEY];
+    return [locked isKindOfClass:[NSArray class]] ? locked : @[];
+}
+
 
 static BOOL APLInvokeBoolReturn(id object, SEL selector, id argument) {
     if (object == nil) return NO;
@@ -63,8 +74,8 @@ static id APLLayoutForContainer(id switcher, id container) {
     return nil;
 }
 
-static BOOL APLLayoutIsLocked(id layout) {
-    if (layout == nil) return NO;
+static BOOL APLLayoutContainsBundle(id layout, NSString *bundleID) {
+    if (layout == nil || bundleID.length == 0) return NO;
     @try {
         SEL selector = NSSelectorFromString(@"containsItemWithBundleIdentifier:");
         if (![layout respondsToSelector:selector]) return NO;
@@ -76,7 +87,7 @@ static BOOL APLLayoutIsLocked(id layout) {
         NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
         [invocation setTarget:layout];
         [invocation setSelector:selector];
-        id argumentToPass = APLLockedBundleIdentifier;
+        id argumentToPass = bundleID;
         [invocation setArgument:&argumentToPass atIndex:2];
         [invocation invoke];
 
@@ -100,6 +111,20 @@ static BOOL APLLayoutIsLocked(id layout) {
     } @catch (NSException *exception) {
     }
     return NO;
+}
+
+// 遍历勾选名单，返回这张卡对应的被锁包名（没被锁返回 nil）
+static NSString *APLLockedBundleIDForLayout(id layout) {
+    if (layout == nil) return nil;
+    for (id item in APLLockedBundleIDs()) {
+        if (![item isKindOfClass:[NSString class]]) continue;
+        NSString *bundleID = (NSString *)item;
+        if (!bundleID.length) continue;
+        if (APLLayoutContainsBundle(layout, bundleID)) {
+            return bundleID;
+        }
+    }
+    return nil;
 }
 
 // 启动 App：先用 LSApplicationWorkspace，失败再用 SBSLaunchApplicationWithIdentifier
@@ -155,15 +180,20 @@ static void APLAuthenticateThen(void (^onSuccess)(void)) {
 %hook SBFluidSwitcherViewController
 
 - (void)didSelectContainer:(id)container modifierFlags:(long long)flags {
-    BOOL isLocked = NO;
-    @try {
-        id layout = APLLayoutForContainer(self, container);
-        isLocked = APLLayoutIsLocked(layout);
-    } @catch (NSException *exception) {
-        isLocked = NO;
+    if (!APLMasterSwitchOn()) {
+        %orig;
+        return;
     }
 
-    if (!isLocked) {
+    NSString *lockedBundleID = nil;
+    @try {
+        id layout = APLLayoutForContainer(self, container);
+        lockedBundleID = APLLockedBundleIDForLayout(layout);
+    } @catch (NSException *exception) {
+        lockedBundleID = nil;
+    }
+
+    if (lockedBundleID == nil) {
         %orig;
         return;
     }
@@ -172,7 +202,7 @@ static void APLAuthenticateThen(void (^onSuccess)(void)) {
         // 不能在主线程同步调启动接口：它会反过来等 SpringBoard 主线程，形成自等死锁（表现为卡二十来秒）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-                APLLaunchBundle(APLLockedBundleIdentifier);
+                APLLaunchBundle(lockedBundleID);
             });
         });
     });

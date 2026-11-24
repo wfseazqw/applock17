@@ -202,7 +202,7 @@ UITableView *myTableView;
         [all addObject:passcodeSpecifier];
 
         [all addObjectsFromArray:[self appGroupWithTitle:@"用户应用"
-                                                 footer:@"勾选后，打开该 App 需要先验证身份"
+                                                 footer:@"勾选哪个 App，它就被加锁：桌面点开要验证，退到后台画面糊掉，多任务点回来也要验证。\n改动后需要注销设备或重新启动才生效。"
                                              systemApps:NO]];
         [all addObjectsFromArray:[self appGroupWithTitle:@"系统应用"
                                                  footer:nil

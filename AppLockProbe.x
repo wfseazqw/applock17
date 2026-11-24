@@ -2,8 +2,8 @@
 #import <objc/runtime.h>
 #import "Common.h"
 
-// 只读探测 2（显示方式修正）：定位「切换器点开卡片」的入口，以及「卡片快照」的处理点。
-// 不改变任何行为。用一个独立的高层级窗口显示，避免被 SpringBoard 启动时的界面重建清理掉。
+// 只读探测 3：确认关键方法的参数类型，并取卡片内容视图的入口名字。
+// 不改变任何行为。
 
 static UIWindow *gProbeWindow = nil;
 
@@ -14,21 +14,12 @@ static BOOL APLHasAny(NSString *s, NSArray *keys) {
     return NO;
 }
 
-static NSArray *APLClassNamesPrefix(NSString *prefix, NSString *kw, NSUInteger limit) {
-    int count = objc_getClassList(NULL, 0);
-    if (count <= 0) return @[];
-    Class *classes = (Class *)malloc(sizeof(Class) * count);
-    objc_getClassList(classes, count);
-    NSMutableArray *out = [NSMutableArray array];
-    for (int i = 0; i < count; i++) {
-        NSString *name = NSStringFromClass(classes[i]);
-        if (name && [name hasPrefix:prefix] && [name containsString:kw]) {
-            if (![out containsObject:name]) [out addObject:name];
-            if (out.count >= limit) break;
-        }
-    }
-    free(classes);
-    return out;
+static NSString *APLTypeOf(NSString *clsName, NSString *sel) {
+    Class c = NSClassFromString(clsName);
+    if (!c) return [NSString stringWithFormat:@"%@ 类不存在", clsName];
+    Method m = class_getInstanceMethod(c, NSSelectorFromString(sel));
+    if (!m) return [NSString stringWithFormat:@"%@ 无 %@", clsName, sel];
+    return [NSString stringWithFormat:@"%@ 类型=%s", sel, method_getTypeEncoding(m)];
 }
 
 static NSString *APLMethodNames(NSString *clsName, NSArray *keys) {
@@ -45,46 +36,33 @@ static NSString *APLMethodNames(NSString *clsName, NSArray *keys) {
     return [NSString stringWithFormat:@"(共%u) %@", n, out.count ? [out componentsJoinedByString:@", "] : @"无匹配"];
 }
 
-static NSString *APLSelectorOf(NSString *clsName, NSString *sel) {
-    Class c = NSClassFromString(clsName);
-    if (!c) return [NSString stringWithFormat:@"%@ 类不存在", clsName];
-    SEL s = NSSelectorFromString(sel);
-    if ([c instancesRespondToSelector:s]) return [NSString stringWithFormat:@"%@ 有实例方法 %@", clsName, sel];
-    if ([c respondsToSelector:s]) return [NSString stringWithFormat:@"%@ 只有类方法有 %@", clsName, sel];
-    return [NSString stringWithFormat:@"%@ 没有 %@", clsName, sel];
-}
-
 static NSString *APLBuildReport(void) {
     NSMutableString *t = [NSMutableString string];
 
-    [t appendString:@"【1 FluidSwitcher 类】\n"];
-    [t appendFormat:@"%@\n\n", [APLClassNamesPrefix(@"SB", @"FluidSwitcher", 16) componentsJoinedByString:@", "]];
+    [t appendString:@"【1 关键方法类型】\n"];
+    for (NSString *sel in @[@"didSelectContainer:modifierFlags:",
+                            @"_isAppLayoutBlurred:",
+                            @"_applyRootContentViewBlurRadiusWithCompletion:",
+                            @"handleTapToBringItemContainerForward:",
+                            @"canSelectContainer:numberOfTaps:",
+                            @"_handleDismissTapGesture:"]) {
+        [t appendFormat:@"%@\n", APLTypeOf(@"SBFluidSwitcherViewController", sel)];
+    }
 
-    [t appendString:@"【2 快照保存相关】\n"];
-    [t appendFormat:@"%@\n", APLSelectorOf(@"SBApplication", @"saveSuspendSnapshot:forSceneHandle:")];
-    [t appendFormat:@"%@\n", APLSelectorOf(@"SBApplication", @"suspendSnapshotForSceneHandle:")];
-    [t appendFormat:@"%@\n\n", APLMethodNames(@"SBAppSwitcherSnapshotViewState", nil)];
+    [t appendString:@"\n【2 卡片内容视图提供者】\n"];
+    [t appendFormat:@"%@\n", APLMethodNames(@"SBFluidSwitcherPageContentViewProvider", nil)];
 
-    [t appendString:@"【3 SBWorkspace 激活法】\n"];
-    [t appendFormat:@"%@\n\n", APLMethodNames(@"SBWorkspace", @[@"activat", @"entity", @"scene", @"transition"])];
+    [t appendString:@"\n【3 卡片容器】\n"];
+    [t appendFormat:@"%@\n", APLMethodNames(@"SBFluidSwitcherItemContainer", @[@"appLayout", @"displayItem", @"content", @"snapshot", @"image"])];
 
-    [t appendString:@"【4 MainWorkspace 激活法】\n"];
-    [t appendFormat:@"%@\n\n", APLMethodNames(@"SBMainWorkspace", @[@"activat", @"entity", @"scene", @"transition"])];
-
-    [t appendString:@"【5 FluidSwitcher 点按相关】\n"];
-    [t appendFormat:@"%@\n\n", APLMethodNames(@"SBFluidSwitcherViewController", @[@"tap", @"select", @"activat", @"press", @"handle", @"begin", @"app"])];
-
-    [t appendString:@"【6 AppController 相关】\n"];
-    [t appendFormat:@"%@\n", APLMethodNames(@"SBApplicationController", @[@"activat", @"foreground", @"front", @"switcher"])];
+    [t appendString:@"\n【4 AppLayout 取包名】\n"];
+    [t appendFormat:@"%@\n", APLMethodNames(@"SBAppLayout", @[@"bundle", @"displayItem"])];
 
     return t;
 }
 
 static void APLShowProbe(void) {
-    if (gProbeWindow) {
-        gProbeWindow.hidden = NO;
-        return;
-    }
+    if (gProbeWindow) { gProbeWindow.hidden = NO; return; }
 
     NSString *text = APLBuildReport();
     [UIPasteboard generalPasteboard].string = text;
@@ -99,14 +77,6 @@ static void APLShowProbe(void) {
     tv.translatesAutoresizingMaskIntoConstraints = NO;
     [vc.view addSubview:tv];
 
-    UIButton *copy = [UIButton buttonWithType:UIButtonTypeSystem];
-    [copy setTitle:@"拷贝" forState:UIControlStateNormal];
-    [copy addAction:[UIAction actionWithHandler:^(__kindof UIAction *a) {
-        [UIPasteboard generalPasteboard].string = text;
-    }] forControlEvents:UIControlEventTouchUpInside];
-    copy.translatesAutoresizingMaskIntoConstraints = NO;
-    [vc.view addSubview:copy];
-
     UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
     [close setTitle:@"关闭" forState:UIControlStateNormal];
     [close addAction:[UIAction actionWithHandler:^(__kindof UIAction *a) {
@@ -116,13 +86,11 @@ static void APLShowProbe(void) {
     [vc.view addSubview:close];
 
     [NSLayoutConstraint activateConstraints:@[
-        [copy.leadingAnchor constraintEqualToAnchor:vc.view.safeAreaLayoutGuide.leadingAnchor constant:16],
-        [copy.topAnchor constraintEqualToAnchor:vc.view.safeAreaLayoutGuide.topAnchor constant:6],
         [close.trailingAnchor constraintEqualToAnchor:vc.view.safeAreaLayoutGuide.trailingAnchor constant:-16],
         [close.topAnchor constraintEqualToAnchor:vc.view.safeAreaLayoutGuide.topAnchor constant:6],
         [tv.leadingAnchor constraintEqualToAnchor:vc.view.leadingAnchor constant:8],
         [tv.trailingAnchor constraintEqualToAnchor:vc.view.trailingAnchor constant:-8],
-        [tv.topAnchor constraintEqualToAnchor:copy.bottomAnchor constant:6],
+        [tv.topAnchor constraintEqualToAnchor:close.bottomAnchor constant:6],
         [tv.bottomAnchor constraintEqualToAnchor:vc.view.bottomAnchor]
     ]];
 

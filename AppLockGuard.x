@@ -25,7 +25,46 @@ static BOOL APLShouldGuard(void) {
     if (![packageType isEqualToString:@"APPL"]) return NO;
     NSString *bundleID = mainBundle.bundleIdentifier;
     if (!bundleID.length) return NO;
-    return APLPrefBool(USER_DEFAULTS_DOMAIN, TWEAK_SPECIFIER_KEY) && APLIsLockedBundle(bundleID);
+
+    // 总开关所在的域在部分 App 沙盒里可能读不到，读不到就按「开启」算，避免整个功能静默失效
+    NSDictionary *tweakDefaults = [[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN];
+    NSNumber *tweakEnabled = tweakDefaults[TWEAK_SPECIFIER_KEY];
+    BOOL isTweakOn = (tweakEnabled == nil) ? YES : [tweakEnabled boolValue];
+
+    return isTweakOn && APLIsLockedBundle(bundleID);
+}
+
+#pragma mark - 临时自检
+
+static BOOL gDiagShown = NO;
+
+static NSString *APLDiagText(void) {
+    NSMutableString *text = [NSMutableString string];
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    [text appendFormat:@"注入: OK\nApp: %@\n", bundleID ?: @"?"];
+    [text appendFormat:@"进程类型: %@\n", [[NSBundle mainBundle] infoDictionary][@"CFBundlePackageType"] ?: @"?"];
+
+    NSDictionary *tweakDefaults = [[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN];
+    id tweakValue = tweakDefaults[TWEAK_SPECIFIER_KEY];
+    [text appendFormat:@"总开关域: %@ (%@)\n",
+        tweakDefaults ? @"读到" : @"读不到",
+        tweakValue ? [tweakValue stringValue] : @"-"];
+
+    NSDictionary *lockDefaults = [[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN_IS_ENABLED];
+    NSArray *list = lockDefaults[BUNDLE_DEFAULTS_IS_ENABLED_KEY];
+    if ([list isKindOfClass:[NSArray class]]) {
+        NSArray *preview = list.count > 4 ? [list subarrayWithRange:NSMakeRange(0, 4)] : list;
+        [text appendFormat:@"锁定名单: %lu 个\n%@%@\n",
+            (unsigned long)list.count,
+            [preview componentsJoinedByString:@"\n"],
+            list.count > 4 ? @"\n..." : @""];
+        [text appendFormat:@"本 App 在名单里: %@\n", [list containsObject:bundleID] ? @"是" : @"否"];
+    } else {
+        [text appendString:@"锁定名单: 读不到\n"];
+    }
+
+    [text appendFormat:@"最终判断: %@", APLShouldGuard() ? @"加锁" : @"不加锁"];
+    return text;
 }
 
 #pragma mark - 遮挡画面
@@ -259,20 +298,44 @@ static BOOL APLShouldGuard(void) {
 
 #pragma mark - Hooks
 
+static BOOL gGuardEnabled = NO;
+
+static void APLShowDiagIfNeeded(void) {
+    if (gDiagShown) return;
+    gDiagShown = YES;
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"应用锁 自检（临时）"
+                                                                  message:APLDiagText()
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault handler:nil]];
+
+    UIViewController *presenter = nil;
+    APLGuard *guard = [APLGuard shared];
+    if (guard.coverWindow && !guard.coverWindow.hidden) {
+        presenter = guard.coverWindow.rootViewController;
+    } else {
+        presenter = [UIApplication sharedApplication].keyWindow.rootViewController;
+    }
+    [presenter presentViewController:alert animated:YES completion:nil];
+}
+
 static void APLInstallNotifications(void) {
     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
 
     [center addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
-        [[APLGuard shared] raiseCover];
+        if (gGuardEnabled) [[APLGuard shared] raiseCover];
     }];
 
     [center addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+        if (!gGuardEnabled) return;
         APLGuard *guard = [APLGuard shared];
         guard.needAuth = YES;
         [guard raiseCover];
     }];
 
     [center addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+        APLShowDiagIfNeeded();
+        if (!gGuardEnabled) return;
         APLGuard *guard = [APLGuard shared];
         if (guard.needAuth) {
             [guard beginAuthentication];
@@ -288,7 +351,7 @@ static void APLInstallNotifications(void) {
 
 -(void)makeKeyAndVisible {
     %orig;
-    if (self.windowLevel == UIWindowLevelNormal && APLShouldGuard()) {
+    if (gGuardEnabled && self.windowLevel == UIWindowLevelNormal) {
         [[APLGuard shared] attachToScene:self.windowScene];
     }
 }
@@ -310,8 +373,17 @@ static void APLInstallNotifications(void) {
 %end
 
 %ctor {
-    if (APLShouldGuard()) {
-        %init(APLGuardGroup);
+    NSBundle *mainBundle = [NSBundle mainBundle];
+    NSString *bundleID = mainBundle.bundleIdentifier;
+    BOOL isAppProcess = [mainBundle.infoDictionary[@"CFBundlePackageType"] isEqualToString:@"APPL"]
+        && bundleID.length
+        && ![bundleID hasPrefix:@"com.apple."];
+
+    if (isAppProcess) {
+        gGuardEnabled = APLShouldGuard();
         APLInstallNotifications();
+        if (gGuardEnabled) {
+            %init(APLGuardGroup);
+        }
     }
 }

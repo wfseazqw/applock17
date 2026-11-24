@@ -2,10 +2,10 @@
 #import <objc/runtime.h>
 #import "Common.h"
 
-// 只读探测 2：定位「切换器点开卡片」的入口，以及「卡片快照」的处理点。
-// 不改变任何行为。
+// 只读探测 2（显示方式修正）：定位「切换器点开卡片」的入口，以及「卡片快照」的处理点。
+// 不改变任何行为。用一个独立的高层级窗口显示，避免被 SpringBoard 启动时的界面重建清理掉。
 
-static BOOL gProbeShown = NO;
+static UIWindow *gProbeWindow = nil;
 
 static BOOL APLHasAny(NSString *s, NSArray *keys) {
     for (NSString *k in keys) {
@@ -81,12 +81,13 @@ static NSString *APLBuildReport(void) {
 }
 
 static void APLShowProbe(void) {
-    if (gProbeShown) return;
-    UIViewController *root = [UIApplication sharedApplication].keyWindow.rootViewController;
-    if (root == nil) return;
-    gProbeShown = YES;
+    if (gProbeWindow) {
+        gProbeWindow.hidden = NO;
+        return;
+    }
 
     NSString *text = APLBuildReport();
+    [UIPasteboard generalPasteboard].string = text;
 
     UIViewController *vc = [[UIViewController alloc] init];
     vc.view.backgroundColor = [UIColor whiteColor];
@@ -109,7 +110,7 @@ static void APLShowProbe(void) {
     UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
     [close setTitle:@"关闭" forState:UIControlStateNormal];
     [close addAction:[UIAction actionWithHandler:^(__kindof UIAction *a) {
-        [vc dismissViewControllerAnimated:YES completion:nil];
+        gProbeWindow.hidden = YES;
     }] forControlEvents:UIControlEventTouchUpInside];
     close.translatesAutoresizingMaskIntoConstraints = NO;
     [vc.view addSubview:close];
@@ -125,14 +126,24 @@ static void APLShowProbe(void) {
         [tv.bottomAnchor constraintEqualToAnchor:vc.view.bottomAnchor]
     ]];
 
-    vc.modalPresentationStyle = UIModalPresentationFullScreen;
-    [root presentViewController:vc animated:YES completion:nil];
+    UIWindowScene *scene = nil;
+    for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+        if ([s isKindOfClass:[UIWindowScene class]]) { scene = (UIWindowScene *)s; break; }
+    }
+
+    UIWindow *w = scene ? [[UIWindow alloc] initWithWindowScene:scene]
+                        : [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    w.windowLevel = UIWindowLevelAlert + 1000;
+    w.rootViewController = vc;
+
+    gProbeWindow = w;
+    w.hidden = NO;
 }
 
 static void APLProbeTryShow(int left) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (gProbeShown) return;
-        if ([UIApplication sharedApplication].keyWindow.rootViewController == nil && left > 0) {
+        if (gProbeWindow) return;
+        if ([UIApplication sharedApplication].connectedScenes.count == 0 && left > 0) {
             APLProbeTryShow(left - 1);
             return;
         }
@@ -143,6 +154,6 @@ static void APLProbeTryShow(int left) {
 __attribute__((constructor)) static void APLProbeInit(void) {
     @autoreleasepool {
         if (![[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.springboard"]) return;
-        APLProbeTryShow(6);
+        APLProbeTryShow(8);
     }
 }

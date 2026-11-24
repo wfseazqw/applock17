@@ -10,7 +10,7 @@ TWEAK_NAME = AppLock
 
 AppLock_FILES = Tweak.x PasswordManager.m UIAlertController+Fast.m
 AppLock_FRAMEWORKS = UIKit LocalAuthentication
-AppLock_CFLAGS = -fobjc-arc -idirafter ./vendor
+AppLock_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -idirafter $(THEOS_PROJECT_DIR)/vendor
 
 SUBPROJECTS += prefs
 include $(THEOS_MAKE_PATH)/tweak.mk

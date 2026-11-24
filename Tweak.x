@@ -104,49 +104,32 @@ static void APLSyncAppStateFiles(void) {
    NSLog(@"[AppLock] 全局状态文件：偏好目录 %d，tmp 目录 %d", wrotePrefsDir, wroteTmpDir);
 }
 
-// 只给某一个 App 写状态：App 被点开时用，保证新装的 App 第一次打开就有正确状态
-static void APLSyncAppStateForBundleID(NSString *bundleID) {
-   if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) return;
-   if ([bundleID hasPrefix:@"com.apple."]) return;
-
-   CFPreferencesAppSynchronize(CFSTR("com.applock.prefs"));
-   CFPreferencesAppSynchronize(CFSTR("com.applock.prefs.isTweakOn"));
-
-   BOOL masterOn = isAppLockEnabled();
-   NSArray *lockedBundleIDs = updateEnabledBundleIDs();
-   if (![lockedBundleIDs isKindOfClass:[NSArray class]]) lockedBundleIDs = @[];
-   BOOL wanted = (masterOn && [lockedBundleIDs containsObject:bundleID]);
-
-   id workspace = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("LSApplicationWorkspace"), @selector(defaultWorkspace));
-   if (workspace == nil) return;
-   id proxy = ((id (*)(id, SEL, id))objc_msgSend)(workspace, @selector(applicationForBundleIdentifier:), bundleID);
-   if (proxy == nil) return;
-   NSURL *containerURL = ((NSURL *(*)(id, SEL))objc_msgSend)(proxy, @selector(dataContainerURL));
-   if (containerURL == nil) return;
-
-   NSString *prefsDir = [[containerURL path] stringByAppendingPathComponent:@"Library/Preferences"];
-   NSFileManager *fileManager = [NSFileManager defaultManager];
-   if (![fileManager fileExistsAtPath:prefsDir]) {
-      if (![fileManager createDirectoryAtPath:prefsDir withIntermediateDirectories:YES attributes:nil error:NULL]) return;
+// App 被点开时顺手补一次全量同步（限频，20 秒内只跑一次），保证新装的 App 也能自动生效。
+// 只用已验证过的全量同步路径，不再调用 applicationForBundleIdentifier:（2.0.4 崩在这里）。
+static void APLSyncAppStateThrottled(void) {
+   static NSTimeInterval lastSync = 0;
+   NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+   if (now - lastSync < 20.0) return;
+   lastSync = now;
+   @try {
+      APLSyncAppStateFiles();
+   } @catch (NSException *exception) {
+      NSLog(@"[AppLock] 启动时同步出错：%@", exception);
    }
-
-   NSString *statePath = [prefsDir stringByAppendingPathComponent:kAPLStateFileName];
-   NSDictionary *oldState = [NSDictionary dictionaryWithContentsOfFile:statePath];
-   if (oldState != nil && [oldState[@"locked"] boolValue] == wanted) return;
-
-   NSDictionary *state = @{ @"locked" : @(wanted),
-                            @"bundleID" : bundleID,
-                            @"updated" : [NSDate date] };
-   [state writeToFile:statePath atomically:YES];
 }
 
+static void APLSyncAppStateAsync(void) {
+   dispatch_async(dispatch_get_main_queue(), ^{
+      APLSyncAppStateThrottled();
+   });
+}
 //widgets AppPredictionsUIWidget.framework
 %hook APUIAppIconGridView
 
 //ios 14 - 15
    -(void)iconTapped:(SBIconView *)iconView {
       NSString *bundleID = iconView.applicationBundleIdentifierForShortcuts;
-      APLSyncAppStateForBundleID(bundleID);
+      APLSyncAppStateAsync();
 
       //check if AppLock tweak is enabled, if not run original method and exit hooked method
       if (isAppLockEnabled() == false) { %orig; return; } 
@@ -177,7 +160,7 @@ static void APLSyncAppStateForBundleID(NSString *bundleID) {
 //ios 14 - 17
 - (void)icon:(SBHApplicationIcon*)applicationIcon launchFromLocation:(id)arg2 context:(id)arg3 {
    NSString *bundleID = applicationIcon.applicationBundleID;
-   APLSyncAppStateForBundleID(bundleID);
+   APLSyncAppStateAsync();
 
    //check if AppLock tweak is enabled, if not run original method and exit hooked method
    if (isAppLockEnabled() == false) { %orig; return; } 
@@ -209,7 +192,7 @@ static void APLSyncAppStateForBundleID(NSString *bundleID) {
 -(void)activateApplication:(SBApplication *)application fromIcon:(id)arg2 location:(long long)arg3 activationSettings:(id)arg4 actions:(id)arg5 {
    
    NSString *bundleID = application.bundleIdentifier;
-   APLSyncAppStateForBundleID(bundleID);
+   APLSyncAppStateAsync();
 
    //check if AppLock tweak is enabled, if not run original method and exit hooked method
    if (isAppLockEnabled() == false) { %orig; return; } 

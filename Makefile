@@ -8,7 +8,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = AppLock
 
-AppLock_FILES = Tweak.x AppLockSwitcher.x PasswordManager.m UIAlertController+Fast.m
+AppLock_FILES = Tweak.x AppLockDebugLog.x PasswordManager.m UIAlertController+Fast.m
 AppLock_FRAMEWORKS = UIKit LocalAuthentication
 AppLock_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -idirafter $(THEOS_PROJECT_DIR)/vendor
 

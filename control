@@ -1,6 +1,6 @@
 Package: com.wfseazqw.applock17
 Name: AppLock
-Version: 1.8.3
+Version: 1.8.4
 Architecture: iphoneos-arm64e
 Description: 用生物识别或密码锁定指定 App，RootHide / iOS 17 适配移植版
 Maintainer: fan

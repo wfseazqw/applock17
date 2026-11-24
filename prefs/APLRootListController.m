@@ -350,6 +350,28 @@ static BOOL APLRebuildFilterPlist(NSString **usedPath, NSString **errorMessage) 
 - (void)viewDidLoad {
     [super viewDidLoad];
     myTableView = [self table];
+
+    UIBarButtonItem *respringItem = [[UIBarButtonItem alloc] initWithTitle:@"注销"
+                                                                    style:UIBarButtonItemStylePlain
+                                                                   target:self
+                                                                   action:@selector(respringPressed:)];
+    self.navigationItem.rightBarButtonItem = respringItem;
+}
+
+// 右上角“注销”：先按当前勾选重建注入名单，再通知 SpringBoard 注销
+-(void)respringPressed:(id)sender {
+    NSString *usedPath = nil;
+    NSString *errorMessage = nil;
+    BOOL rebuilt = APLRebuildFilterPlist(&usedPath, &errorMessage);
+
+    NSString *message = rebuilt
+        ? @"名单已重建，正在注销…"
+        : [NSString stringWithFormat:@"名单重建失败：%@\n仍会注销。", errorMessage ?: @"未知错误"];
+    NSLog(@"[AppLock] respring pressed: %@", message);
+
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.wfseazqw.applock17.respring"),
+                                         NULL, NULL, true);
 }
 
 //MARK: UIAdaptivePresentationControllerDelegate

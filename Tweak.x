@@ -1,5 +1,7 @@
 #import "Tweak.h"
 #import <dlfcn.h>
+#import <signal.h>
+#import <unistd.h>
 
 static PasswordManager *passwordManager;
 
@@ -152,6 +154,18 @@ static void appLockSetup() {
 %end
 
 
+// 设置页点“注销”后发来的通知：先把名单再同步一次，再让 SpringBoard 重启（等同注销）
+static void APLRespringNotificationCallback(CFNotificationCenterRef center,
+                                            void *observer,
+                                            CFNotificationName name,
+                                            const void *object,
+                                            CFDictionaryRef userInfo) {
+   dispatch_async(dispatch_get_main_queue(), ^{
+      APLSyncInjectedBundles();
+      kill(getpid(), SIGKILL);
+   });
+}
+
  %ctor {
    appLockSetup();
 
@@ -160,6 +174,12 @@ static void appLockSetup() {
    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
    if ([bundleID isEqualToString:@"com.apple.springboard"]) {
       APLSyncInjectedBundles();
+      CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                      NULL,
+                                      APLRespringNotificationCallback,
+                                      CFSTR("com.wfseazqw.applock17.respring"),
+                                      NULL,
+                                      CFNotificationSuspensionBehaviorDeliverImmediately);
    }
  }
 

@@ -9,7 +9,33 @@
 #import <Foundation/Foundation.h>
 #import "APLRootListController.h"
 #import <Preferences/Preferences.h>
-#import <MobileCoreServices/LSApplicationWorkspace.h>
+#import <dlfcn.h>
+
+// 只用运行时访问，不依赖私有框架头，避免 SDK 头与私有声明冲突
+static id APLSafePerform(id target, NSString *selectorName) {
+    if(!target) return nil;
+    SEL sel = NSSelectorFromString(selectorName);
+    if(![target respondsToSelector:sel]) return nil;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    return [target performSelector:sel];
+#pragma clang diagnostic pop
+}
+
+static NSString *APLString(id target, NSString *selectorName) {
+    id value = APLSafePerform(target, selectorName);
+    return [value isKindOfClass:[NSString class]] ? value : nil;
+}
+
+static NSArray *APLAllApplications(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dlopen("/System/Library/Frameworks/MobileCoreServices.framework/MobileCoreServices", RTLD_LAZY);
+    });
+    id workspace = APLSafePerform((id)NSClassFromString(@"LSApplicationWorkspace"), @"defaultWorkspace");
+    id all = APLSafePerform(workspace, @"allInstalledApplications");
+    return [all isKindOfClass:[NSArray class]] ? all : @[];
+}
 
 static PSSpecifier *tweakEnabledSpecifier;
 static PSSpecifier *biometricsSpecifier;
@@ -68,29 +94,31 @@ UITableView *myTableView;
 //MARK: 应用列表
 
 -(NSArray *)sortedApplications:(BOOL)systemApps {
-    LSApplicationWorkspace *workspace = [LSApplicationWorkspace defaultWorkspace];
-    NSArray *all = [workspace allInstalledApplications];
     NSMutableArray *result = [NSMutableArray array];
 
-    for(LSApplicationProxy *proxy in all) {
-        NSString *identifier = proxy.bundleIdentifier;
+    for(id proxy in APLAllApplications()) {
+        NSString *identifier = APLString(proxy, @"bundleIdentifier");
         if(!identifier.length) continue;
         if([identifier hasPrefix:@"com.apple.WebKit"]) continue;
 
-        BOOL isSystem = [proxy.applicationType isEqualToString:@"System"];
+        NSString *type = APLString(proxy, @"applicationType");
+        BOOL isSystem = [type isEqualToString:@"System"];
         if(isSystem != systemApps) continue;
 
-        NSString *name = proxy.localizedName;
-        if(!name.length) continue;
-        if([proxy.appTags containsObject:@"hidden"]) continue;
+        if(!APLString(proxy, @"localizedName").length) continue;
+
+        id tags = APLSafePerform(proxy, @"appTags");
+        if([tags isKindOfClass:[NSArray class]] && [tags containsObject:@"hidden"]) continue;
 
         [result addObject:proxy];
     }
 
-    [result sortUsingComparator:^NSComparisonResult(LSApplicationProxy *a, LSApplicationProxy *b) {
-        NSString *nameA = a.localizedName.length ? a.localizedName : a.bundleIdentifier;
-        NSString *nameB = b.localizedName.length ? b.localizedName : b.bundleIdentifier;
-        return [nameA localizedCaseInsensitiveCompare:nameB];
+    [result sortUsingComparator:^NSComparisonResult(id a, id b) {
+        NSString *nameA = APLString(a, @"localizedName");
+        NSString *nameB = APLString(b, @"localizedName");
+        if(!nameA.length) nameA = APLString(a, @"bundleIdentifier");
+        if(!nameB.length) nameB = APLString(b, @"bundleIdentifier");
+        return [(nameA ?: @"") localizedCaseInsensitiveCompare:(nameB ?: @"")];
     }];
 
     return result;
@@ -109,8 +137,11 @@ UITableView *myTableView;
     if(footer) [header setProperty:footer forKey:@"footerText"];
     [group addObject:header];
 
-    for(LSApplicationProxy *proxy in [self sortedApplications:systemApps]) {
-        NSString *display = proxy.localizedName.length ? proxy.localizedName : proxy.bundleIdentifier;
+    for(id proxy in [self sortedApplications:systemApps]) {
+        NSString *display = APLString(proxy, @"localizedName");
+        NSString *identifier = APLString(proxy, @"bundleIdentifier");
+        if(!display.length) display = identifier;
+        if(!display.length) continue;
         PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:display
                                                           target:self
                                                              set:@selector(setAppLocked:specifier:)
@@ -118,7 +149,7 @@ UITableView *myTableView;
                                                           detail:Nil
                                                             cell:PSSwitchCell
                                                             edit:Nil];
-        [spec setProperty:proxy.bundleIdentifier forKey:@"bundleID"];
+        [spec setProperty:identifier forKey:@"bundleID"];
         [spec setProperty:@NO forKey:@"default"];
         [group addObject:spec];
     }

@@ -291,11 +291,28 @@ static BOOL APLRebuildFilterPlist(NSString **usedPath, NSString **errorMessage) 
     NSString *errorMessage = nil;
     BOOL ok = APLRebuildFilterPlist(&usedPath, &errorMessage);
 
-    NSString *message = nil;
+    NSDictionary *syncReport = [[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN_IS_ENABLED][@"syncReport"];
+    if(![syncReport isKindOfClass:[NSDictionary class]]) syncReport = nil;
+
+    NSMutableString *message = [NSMutableString string];
     if(ok) {
-        message = [NSString stringWithFormat:@"注入名单已重建\n%@\n\n当前注入：\n%@", usedPath, [[self bundlesInFilterPlist:usedPath] componentsJoinedByString:@"\n"]];
+        [message appendFormat:@"本次重建成功\n%@\n当前注入：\n%@\n\n", usedPath, [[self bundlesInFilterPlist:usedPath] componentsJoinedByString:@"\n"]];
     } else {
-        message = [NSString stringWithFormat:@"重建失败：%@", errorMessage];
+        [message appendFormat:@"本次重建失败：%@\n\n", errorMessage];
+    }
+
+    if(syncReport) {
+        NSArray *dirNames = syncReport[@"dirNames"];
+        [message appendFormat:@"SpringBoard 上次启动时的记录：\n路径：%@\n写入：%@\n注入：%@\n备注：%@\n",
+         syncReport[@"path"],
+         [syncReport[@"written"] boolValue] ? @"成功" : @"失败",
+         [syncReport[@"bundles"] componentsJoinedByString:@", "],
+         syncReport[@"detail"]];
+        if([dirNames isKindOfClass:[NSArray class]] && dirNames.count) {
+            [message appendFormat:@"该目录内文件：\n%@\n", [dirNames componentsJoinedByString:@"\n"]];
+        }
+    } else {
+        [message appendString:@"\n（还没有 SpringBoard 那边的记录，先点右上角注销一次再来查）"];
     }
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"注入名单" message:message preferredStyle:UIAlertControllerStyleAlert];

@@ -26,10 +26,28 @@ static NSString *APLInjectionFilterPlistPath(void) {
    return [[dylibPath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"AppLock.plist"];
 }
 
+// 把本次同步的诊断信息写进同一个偏好域，设置页可以直接读出来显示
+static void APLSaveSyncReport(NSString *path, BOOL written, NSArray *bundles, NSString *detail) {
+   NSMutableDictionary *domain = [[[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN_IS_ENABLED] mutableCopy];
+   if (domain == nil) domain = [NSMutableDictionary dictionary];
+   domain[@"syncReport"] = @{
+      @"time" : [NSString stringWithFormat:@"%@", [NSDate date]],
+      @"path" : path ?: @"(空)",
+      @"written" : @(written),
+      @"bundles" : bundles ?: @[],
+      @"detail" : detail ?: @"",
+   };
+   [[NSUserDefaults standardUserDefaults] setPersistentDomain:domain forName:USER_DEFAULTS_DOMAIN_IS_ENABLED];
+   [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
 // 按“已勾选加锁的 App”重写注入名单：SpringBoard / Spotlight 固定保留，其余只放被勾选的第三方 App
 static void APLSyncInjectedBundles(void) {
    NSString *plistPath = APLInjectionFilterPlistPath();
-   if (!plistPath.length) return;
+   if (!plistPath.length) {
+      APLSaveSyncReport(nil, NO, @[], @"拿不到自身 dylib 路径");
+      return;
+   }
 
    NSArray *lockedBundleIDs = updateEnabledBundleIDs();
    NSMutableArray *bundles = [NSMutableArray arrayWithObjects:@"com.apple.springboard", @"com.apple.Spotlight", nil];
@@ -49,9 +67,28 @@ static void APLSyncInjectedBundles(void) {
                                                                  format:NSPropertyListXMLFormat_v1_0
                                                                 options:0
                                                                   error:NULL];
-   if (plistData == nil) return;
-   BOOL written = [plistData writeToFile:plistPath atomically:YES];
+   if (plistData == nil) {
+      APLSaveSyncReport(plistPath, NO, bundles, @"序列化失败");
+      return;
+   }
+
+   NSError *writeError = nil;
+   BOOL written = [plistData writeToFile:plistPath options:NSDataWritingAtomic error:&writeError];
+   NSString *detail = written ? @"" : (writeError.localizedDescription ?: @"写入失败");
+
+   // 同目录内容，帮助判断注入器到底读的是哪个文件
+   NSArray *dirNames = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:[plistPath stringByDeletingLastPathComponent] error:NULL];
+
    NSLog(@"[AppLock] injected bundles updated (%d): %@ -> %@", written, bundles, plistPath);
+   APLSaveSyncReport(plistPath, written, bundles, detail);
+   if (dirNames.count) {
+      NSMutableDictionary *domain = [[[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN_IS_ENABLED] mutableCopy];
+      NSMutableDictionary *report = [domain[@"syncReport"] mutableCopy];
+      report[@"dirNames"] = dirNames;
+      domain[@"syncReport"] = report;
+      [[NSUserDefaults standardUserDefaults] setPersistentDomain:domain forName:USER_DEFAULTS_DOMAIN_IS_ENABLED];
+      [[NSUserDefaults standardUserDefaults] synchronize];
+   }
 }
 
 BOOL isAppLockEnabled() {

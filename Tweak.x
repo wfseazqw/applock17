@@ -104,32 +104,13 @@ static void APLSyncAppStateFiles(void) {
    NSLog(@"[AppLock] 全局状态文件：偏好目录 %d，tmp 目录 %d", wrotePrefsDir, wroteTmpDir);
 }
 
-// App 被点开时顺手补一次全量同步（限频，20 秒内只跑一次），保证新装的 App 也能自动生效。
-// 只用已验证过的全量同步路径，不再调用 applicationForBundleIdentifier:（2.0.4 崩在这里）。
-static void APLSyncAppStateThrottled(void) {
-   static NSTimeInterval lastSync = 0;
-   NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-   if (now - lastSync < 20.0) return;
-   lastSync = now;
-   @try {
-      APLSyncAppStateFiles();
-   } @catch (NSException *exception) {
-      NSLog(@"[AppLock] 启动时同步出错：%@", exception);
-   }
-}
-
-static void APLSyncAppStateAsync(void) {
-   dispatch_async(dispatch_get_main_queue(), ^{
-      APLSyncAppStateThrottled();
-   });
-}
 //widgets AppPredictionsUIWidget.framework
 %hook APUIAppIconGridView
 
 //ios 14 - 15
    -(void)iconTapped:(SBIconView *)iconView {
       NSString *bundleID = iconView.applicationBundleIdentifierForShortcuts;
-      APLSyncAppStateAsync();
+      
 
       //check if AppLock tweak is enabled, if not run original method and exit hooked method
       if (isAppLockEnabled() == false) { %orig; return; } 
@@ -160,7 +141,7 @@ static void APLSyncAppStateAsync(void) {
 //ios 14 - 17
 - (void)icon:(SBHApplicationIcon*)applicationIcon launchFromLocation:(id)arg2 context:(id)arg3 {
    NSString *bundleID = applicationIcon.applicationBundleID;
-   APLSyncAppStateAsync();
+   
 
    //check if AppLock tweak is enabled, if not run original method and exit hooked method
    if (isAppLockEnabled() == false) { %orig; return; } 
@@ -192,7 +173,7 @@ static void APLSyncAppStateAsync(void) {
 -(void)activateApplication:(SBApplication *)application fromIcon:(id)arg2 location:(long long)arg3 activationSettings:(id)arg4 actions:(id)arg5 {
    
    NSString *bundleID = application.bundleIdentifier;
-   APLSyncAppStateAsync();
+   
 
    //check if AppLock tweak is enabled, if not run original method and exit hooked method
    if (isAppLockEnabled() == false) { %orig; return; } 
@@ -263,8 +244,25 @@ static void APLRespringNotificationCallback(CFNotificationCenterRef center,
                                       CFNotificationSuspensionBehaviorDeliverImmediately);
 
       dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-         APLSyncAppStateFiles();
+         @try {
+            APLSyncAppStateFiles();
+         } @catch (NSException *exception) {
+            NSLog(@"[AppLock] 启动同步出错：%@", exception);
+         }
       });
+
+      // 每 60 秒补一次：新装的 App 不用注销、不用重打包也会自动出现在状态里
+      // （只在 SpringBoard 自己的定时器里跑，绝不挂在 App 启动流程上）
+      NSTimer *syncTimer = [NSTimer scheduledTimerWithTimeInterval:60.0
+                                                          repeats:YES
+                                                            block:^(NSTimer *timer) {
+         @try {
+            APLSyncAppStateFiles();
+         } @catch (NSException *exception) {
+            NSLog(@"[AppLock] 定时同步出错：%@", exception);
+         }
+      }];
+      (void)syncTimer;
    }
  }
 

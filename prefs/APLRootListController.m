@@ -249,6 +249,14 @@ static BOOL APLRebuildFilterPlist(NSString **usedPath, NSString **errorMessage) 
     bundleDefaults[BUNDLE_DEFAULTS_IS_ENABLED_KEY] = locked;
     [[NSUserDefaults standardUserDefaults] setPersistentDomain:bundleDefaults forName:USER_DEFAULTS_DOMAIN_IS_ENABLED];
     [[NSUserDefaults standardUserDefaults] synchronize];
+    [self notifyStateChanged];
+}
+
+// 通知 SpringBoard：勾选变了，把“锁/不锁”重新写进各个 App 的容器（不用注销就生效）
+-(void)notifyStateChanged {
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.wfseazqw.applock17.listchanged"),
+                                         NULL, NULL, true);
 }
 
 -(id)isAppLocked:(PSSpecifier *)specifier {
@@ -414,6 +422,7 @@ static NSString *const APLDiagnoseButtonTitle = @"检查并重建注入名单";
         [passcodeSwitchControl setOn:false animated:true];
         [biometricsSwitchControl setOn:false animated:true];
     }
+    [self notifyStateChanged];
 }
 
 -(void)biometricsSwitchChanged:(id)sender {

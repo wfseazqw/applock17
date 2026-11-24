@@ -83,8 +83,51 @@ static NSNumber *APLMasterViaFile(void) {
 
 #pragma mark - 判定
 
-// 总开关 + 当前 App 是否在勾选名单里（三种读法任意一种读出来就算数，越靠前越可信）
+// 2.0.2：SpringBoard 会把“锁/不锁”写进本 App 自己的容器，这是沙盒内一定能读到的位置
+static NSString *APLOwnStatePath(void) {
+    NSString *library = [NSHomeDirectory() stringByAppendingPathComponent:@"Library"];
+    return [[library stringByAppendingPathComponent:@"Preferences"]
+            stringByAppendingPathComponent:@"com.applock.state.plist"];
+}
+
+static NSDictionary *APLOwnState(void) {
+    NSDictionary *state = [NSDictionary dictionaryWithContentsOfFile:APLOwnStatePath()];
+    return [state isKindOfClass:[NSDictionary class]] ? state : nil;
+}
+
+// SpringBoard 额外写的两份全局状态，容器写不进去时用
+static NSString *const kAPLGlobalPrefsPath = @"/var/mobile/Library/Preferences/com.applock.state.plist";
+static NSString *const kAPLGlobalTmpPath = @"/private/var/tmp/com.applock.state.plist";
+
+static NSDictionary *APLGlobalState(NSString *path) {
+    NSDictionary *state = [NSDictionary dictionaryWithContentsOfFile:path];
+    return [state isKindOfClass:[NSDictionary class]] ? state : nil;
+}
+
+static NSString *gAPLStateSource = @"无";   // 自检面板用：这次是从哪儿判断出来的
+
 static BOOL APLShouldProtectSelf(void) {
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+
+    NSDictionary *ownState = APLOwnState();
+    if (ownState != nil) {
+        gAPLStateSource = @"容器";
+        return [ownState[@"locked"] boolValue];
+    }
+
+    for (NSString *path in @[ kAPLGlobalTmpPath, kAPLGlobalPrefsPath ]) {
+        NSDictionary *global = APLGlobalState(path);
+        if (global == nil) continue;
+        NSDictionary *apps = global[@"apps"];
+        if (![apps isKindOfClass:[NSDictionary class]]) continue;
+        id value = bundleID ? apps[bundleID] : nil;
+        if ([value isKindOfClass:[NSNumber class]]) {
+            gAPLStateSource = [path isEqualToString:kAPLGlobalTmpPath] ? @"tmp" : @"偏好目录";
+            return [value boolValue];
+        }
+    }
+
+    gAPLStateSource = @"名单";
     NSArray *locked = APLListViaCFPreferences();
     if (locked == nil) locked = APLListViaNSUserDefaults();
     if (locked == nil) locked = APLListViaFile();
@@ -94,7 +137,6 @@ static BOOL APLShouldProtectSelf(void) {
     if (master == nil) master = APLMasterViaFile();
     if (master != nil && ![master boolValue]) return NO;
 
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!bundleID.length) return NO;
     if (![locked isKindOfClass:[NSArray class]]) return NO;
     return [locked containsObject:bundleID];
@@ -109,29 +151,28 @@ static NSString *APLYesNo(BOOL value) {
 static NSString *APLDiagText(void) {
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"(无)";
 
+    NSDictionary *ownState = APLOwnState();
+    NSDictionary *tmpState = APLGlobalState(kAPLGlobalTmpPath);
+    NSDictionary *prefsState = APLGlobalState(kAPLGlobalPrefsPath);
+
     NSArray *cfList = APLListViaCFPreferences();
     NSArray *udList = APLListViaNSUserDefaults();
     NSArray *fileList = APLListViaFile();
 
-    NSNumber *cfMaster = APLMasterViaCFPreferences();
-    NSNumber *udMaster = APLMasterViaNSUserDefaults();
-
-    NSArray *effective = cfList ?: udList ?: fileList;
-    BOOL hit = [effective isKindOfClass:[NSArray class]] && [effective containsObject:bundleID];
+    BOOL hit = APLShouldProtectSelf();
 
     NSMutableString *text = [NSMutableString string];
-    [text appendFormat:@"AppLock 2.0.1 自检\n本App：%@\n", bundleID];
-    [text appendFormat:@"总开关 CF:%@ NS:%@\n", cfMaster ? (cfMaster.boolValue ? @"1" : @"0") : @"—",
-                                            udMaster ? (udMaster.boolValue ? @"1" : @"0") : @"—"];
-    [text appendFormat:@"名单 CF:%@(%lu) NS:%@(%lu) 文件:%@(%lu)\n",
+    [text appendFormat:@"AppLock 2.0.2 自检\n本App：%@\n", bundleID];
+    [text appendFormat:@"判定来源：%@ → 糊屏%@\n", gAPLStateSource, hit ? @"开" : @"关"];
+    [text appendFormat:@"容器状态:%@ tmp:%@ 偏好目录:%@\n",
+        ownState ? @"有" : @"无", tmpState ? @"有" : @"无", prefsState ? @"有" : @"无"];
+    if (ownState) {
+        [text appendFormat:@"容器 locked:%@\n", [ownState[@"locked"] boolValue] ? @"1" : @"0"];
+    }
+    [text appendFormat:@"名单 CF:%@(%lu) NS:%@(%lu) 文件:%@(%lu)",
         APLYesNo(cfList != nil), (unsigned long)cfList.count,
         APLYesNo(udList != nil), (unsigned long)udList.count,
         APLYesNo(fileList != nil), (unsigned long)fileList.count];
-    if ([effective isKindOfClass:[NSArray class]] && effective.count) {
-        [text appendFormat:@"内容：%@\n", [effective componentsJoinedByString:@", "]];
-    }
-    [text appendFormat:@"文件路径：%@\n本App在名单：%@ → 糊屏%@", gAPLReadPath ?: @"(无)",
-        hit ? @"是" : @"否", hit ? @"开" : @"关"];
     return text;
 }
 

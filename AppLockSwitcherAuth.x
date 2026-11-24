@@ -200,7 +200,8 @@ static void APLAuthenticateThen(void (^onSuccess)(void)) {
 
     APLAuthenticateThen(^{
         // 不能在主线程同步调启动接口：它会反过来等 SpringBoard 主线程，形成自等死锁（表现为卡二十来秒）
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        // 1.2：验证通过后只等 0.1 秒就拉起 App（原来 0.25 秒，点卡片时明显觉得“不痛快”）
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
                 APLLaunchBundle(lockedBundleID);
             });

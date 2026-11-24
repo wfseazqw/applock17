@@ -1,15 +1,18 @@
 #import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <CoreImage/CoreImage.h>
 #import "Common.h"
 
 // 应用锁 —— App 自身进程内的“糊屏”
-// 只负责一件事：这个 App 被勾选为加锁时，退到后台（含打开多任务界面）就在它自己的窗口上盖一层毛玻璃，
+// 只负责一件事：这个 App 被勾选为加锁时，退到后台（含打开多任务界面）就在它自己的窗口上盖一层糊图，
 // 系统给多任务卡片拍照时拍到的就是这层糊图；回到前台就撤掉（验证已在 SpringBoard 先做过）。
-// 2.0.3 正式版：
-//   App 进程被沙盒限制，读不到设置页那份名单（com.applock.prefs 三种读法实测都拿不到），
-//   所以改由 SpringBoard 把“锁/不锁”写进每个 App 自己的容器，App 只读自己的文件。
+// 1.1 起：App 进程读不到设置页那份名单（沙盒限制），状态由 SpringBoard 写进本 App 自己的容器。
+// 1.2：改成“先截自己窗口一张图、缩小再高斯模糊、再铺满”，
+//      因为 UIVisualEffectView 的实时模糊在系统快照里渲染不出来，卡片上只会看到一块深色板子，不像糊。
 
-static UIVisualEffectView *gAPLOverlay = nil;
+static UIView *gAPLOverlay = nil;
+static CIContext *gAPLBlurContext = nil;
 
 #pragma mark - 读状态
 
@@ -17,7 +20,6 @@ static NSString *const kAPLStateFileName = @"com.applock.state.plist";
 static NSString *const kAPLGlobalPrefsPath = @"/var/mobile/Library/Preferences/com.applock.state.plist";
 static NSString *const kAPLGlobalTmpPath = @"/private/var/tmp/com.applock.state.plist";
 
-// 自己容器里的状态（SpringBoard 写的，沙盒内一定读得到）
 static NSDictionary *APLOwnState(void) {
     NSString *library = [NSHomeDirectory() stringByAppendingPathComponent:@"Library"];
     NSString *path = [[library stringByAppendingPathComponent:@"Preferences"] stringByAppendingPathComponent:kAPLStateFileName];
@@ -30,8 +32,6 @@ static NSDictionary *APLGlobalState(NSString *path) {
     return [state isKindOfClass:[NSDictionary class]] ? state : nil;
 }
 
-#pragma mark - 名单兜底（正常用不到，容器状态读不到时才走）
-
 static NSArray *APLListViaCFPreferences(void) {
     CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("switchIsEnabled"), CFSTR("com.applock.prefs"));
     NSArray *result = nil;
@@ -42,11 +42,6 @@ static NSArray *APLListViaCFPreferences(void) {
         CFRelease(value);
     }
     return result;
-}
-
-static NSArray *APLListViaNSUserDefaults(void) {
-    id value = [[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN_IS_ENABLED][BUNDLE_DEFAULTS_IS_ENABLED_KEY];
-    return [value isKindOfClass:[NSArray class]] ? value : nil;
 }
 
 static NSArray *APLListViaFile(void) {
@@ -61,29 +56,6 @@ static NSArray *APLListViaFile(void) {
     return nil;
 }
 
-static NSNumber *APLMasterViaCFPreferences(void) {
-    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("isTweakEnabled"), CFSTR("com.applock.prefs.isTweakOn"));
-    NSNumber *result = nil;
-    if (value != NULL) {
-        CFTypeID type = CFGetTypeID(value);
-        if (type == CFBooleanGetTypeID()) {
-            result = @(CFBooleanGetValue((CFBooleanRef)value));
-        } else if (type == CFNumberGetTypeID()) {
-            int number = 0;
-            CFNumberGetValue((CFNumberRef)value, kCFNumberIntType, &number);
-            result = @(number != 0);
-        }
-        CFRelease(value);
-    }
-    return result;
-}
-
-#pragma mark - 判定
-
-// 这个 App 现在要不要糊屏
-// 1) 自己容器里的状态文件（SpringBoard 写的，最可靠的通道）
-// 2) tmp / 偏好目录里的全局状态
-// 3) 都读不到才退回原来的跨域读法
 static BOOL APLShouldProtectSelf(void) {
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
 
@@ -104,17 +76,13 @@ static BOOL APLShouldProtectSelf(void) {
     }
 
     NSArray *locked = APLListViaCFPreferences();
-    if (locked == nil) locked = APLListViaNSUserDefaults();
     if (locked == nil) locked = APLListViaFile();
     if (![locked isKindOfClass:[NSArray class]]) return NO;
-
-    NSNumber *master = APLMasterViaCFPreferences();
-    if (master != nil && ![master boolValue]) return NO;
     if (!bundleID.length) return NO;
     return [locked containsObject:bundleID];
 }
 
-#pragma mark - 糊屏
+#pragma mark - 截图 + 模糊
 
 static UIWindow *APLTopWindow(void) {
     if (@available(iOS 13.0, *)) {
@@ -128,9 +96,56 @@ static UIWindow *APLTopWindow(void) {
     return [UIApplication sharedApplication].keyWindow;
 }
 
+// 把自己窗口截小图 → 高斯模糊 → 铺满用。缩到 1/8 左右再模糊，几十毫秒内就能做完。
+static UIImage *APLFrostedImage(UIWindow *window) {
+    if (window == nil) return nil;
+    CGRect bounds = window.bounds;
+    if (bounds.size.width < 8 || bounds.size.height < 8) return nil;
+
+    CGSize small = CGSizeMake(floor(bounds.size.width * 0.12), floor(bounds.size.height * 0.12));
+    if (small.width < 8) small.width = 8;
+    if (small.height < 8) small.height = 8;
+
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
+    format.scale = 1.0;
+    format.opaque = YES;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:small format:format];
+
+    UIImage *snapshot = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        @try {
+            [window drawViewHierarchyInRect:CGRectMake(0, 0, small.width, small.height) afterScreenUpdates:NO];
+        } @catch (NSException *exception) {
+        }
+    }];
+    if (snapshot == nil || snapshot.CGImage == NULL) return nil;
+
+    CIImage *input = [CIImage imageWithCGImage:snapshot.CGImage];
+    if (input == nil) return snapshot;
+
+    CIFilter *blur = [CIFilter filterWithName:@"CIGaussianBlur"];
+    if (blur == nil) return snapshot;
+
+    [blur setValue:input forKey:kCIInputImageKey];
+    [blur setValue:@(7.0) forKey:kCIInputRadiusKey];
+    CIImage *output = [[blur outputImage] imageByCroppingToRect:input.extent];
+    if (output == nil) return snapshot;
+
+    if (gAPLBlurContext == nil) {
+        gAPLBlurContext = [CIContext contextWithOptions:nil];
+    }
+    CGImageRef image = [gAPLBlurContext createCGImage:output fromRect:input.extent];
+    if (image == NULL) return snapshot;
+
+    UIImage *result = [UIImage imageWithCGImage:image];
+    CGImageRelease(image);
+    return result ?: snapshot;
+}
+
+#pragma mark - 盖/撤
+
 static void APLRemoveOverlay(void) {
     if (gAPLOverlay == nil) return;
-    UIVisualEffectView *overlay = gAPLOverlay;
+    UIView *overlay = gAPLOverlay;
     gAPLOverlay = nil;
     [UIView animateWithDuration:0.12 animations:^{
         overlay.alpha = 0.0;
@@ -149,15 +164,24 @@ static void APLShowOverlay(void) {
         return;
     }
 
-    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark]];
-    blur.frame = window.bounds;
-    blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    blur.userInteractionEnabled = YES;
+    UIView *cover = [[UIView alloc] initWithFrame:window.bounds];
+    cover.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    cover.userInteractionEnabled = YES;
 
-    UIView *dim = [[UIView alloc] initWithFrame:blur.bounds];
-    dim.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.28];
+    UIImage *frosted = APLFrostedImage(window);
+    if (frosted != nil) {
+        UIImageView *imageView = [[UIImageView alloc] initWithImage:frosted];
+        imageView.frame = cover.bounds;
+        imageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        imageView.contentMode = UIViewContentModeScaleToFill;
+        imageView.layer.magnificationFilter = kCAFilterLinear;
+        [cover addSubview:imageView];
+    }
+
+    UIView *dim = [[UIView alloc] initWithFrame:cover.bounds];
+    dim.backgroundColor = [UIColor colorWithWhite:0.0 alpha:frosted ? 0.22 : 0.75];
     dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [blur.contentView addSubview:dim];
+    [cover addSubview:dim];
 
     UILabel *title = [[UILabel alloc] initWithFrame:CGRectZero];
     title.text = @"AppLock 已锁定";
@@ -165,26 +189,26 @@ static void APLShowOverlay(void) {
     title.font = [UIFont boldSystemFontOfSize:26];
     title.textAlignment = NSTextAlignmentCenter;
     title.translatesAutoresizingMaskIntoConstraints = NO;
-    [blur.contentView addSubview:title];
+    [cover addSubview:title];
 
     UILabel *tip = [[UILabel alloc] initWithFrame:CGRectZero];
     tip.text = @"需要面容或密码验证";
-    tip.textColor = [UIColor colorWithWhite:1.0 alpha:0.75];
+    tip.textColor = [UIColor colorWithWhite:1.0 alpha:0.78];
     tip.font = [UIFont systemFontOfSize:15];
     tip.textAlignment = NSTextAlignmentCenter;
     tip.translatesAutoresizingMaskIntoConstraints = NO;
-    [blur.contentView addSubview:tip];
+    [cover addSubview:tip];
 
     [NSLayoutConstraint activateConstraints:@[
-        [title.centerXAnchor constraintEqualToAnchor:blur.contentView.centerXAnchor],
-        [title.centerYAnchor constraintEqualToAnchor:blur.contentView.centerYAnchor constant:-14],
-        [tip.centerXAnchor constraintEqualToAnchor:blur.contentView.centerXAnchor],
+        [title.centerXAnchor constraintEqualToAnchor:cover.centerXAnchor],
+        [title.centerYAnchor constraintEqualToAnchor:cover.centerYAnchor constant:-14],
+        [tip.centerXAnchor constraintEqualToAnchor:cover.centerXAnchor],
         [tip.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:8],
     ]];
 
-    blur.alpha = 1.0;
-    [window addSubview:blur];
-    gAPLOverlay = blur;
+    cover.alpha = 1.0;
+    [window addSubview:cover];
+    gAPLOverlay = cover;
 }
 
 __attribute__((constructor)) static void APLAppGuardInit(void) {

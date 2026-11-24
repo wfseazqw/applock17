@@ -1,18 +1,14 @@
 #import <UIKit/UIKit.h>
-#import <QuartzCore/QuartzCore.h>
 #import <CoreFoundation/CoreFoundation.h>
-#import <CoreImage/CoreImage.h>
 #import "Common.h"
 
-// 应用锁 —— App 自身进程内的“糊屏”
-// 只负责一件事：这个 App 被勾选为加锁时，退到后台（含打开多任务界面）就在它自己的窗口上盖一层糊图，
-// 系统给多任务卡片拍照时拍到的就是这层糊图；回到前台就撤掉（验证已在 SpringBoard 先做过）。
+// 应用锁 —— App 自身进程内的“遮屏”
+// 只负责一件事：这个 App 被勾选为加锁时，退到后台（含打开多任务界面）就在它自己的窗口上盖一张不透明的灰卡，
+// 系统给多任务卡片拍照时拍到的就是这张灰卡；回到前台就撤掉（验证已在 SpringBoard 先做过）。
 // 1.1 起：App 进程读不到设置页那份名单（沙盒限制），状态由 SpringBoard 写进本 App 自己的容器。
-// 1.2：改成“先截自己窗口一张图、缩小再高斯模糊、再铺满”，
-//      因为 UIVisualEffectView 的实时模糊在系统快照里渲染不出来，卡片上只会看到一块深色板子，不像糊。
+// 1.4：按用户要求改成整张不透明灰卡——边缘不再露出任何内容，也不再隐约能看见字。
 
 static UIView *gAPLOverlay = nil;
-static CIContext *gAPLBlurContext = nil;
 
 #pragma mark - 读状态
 
@@ -82,7 +78,7 @@ static BOOL APLShouldProtectSelf(void) {
     return [locked containsObject:bundleID];
 }
 
-#pragma mark - 截图 + 模糊
+#pragma mark - 盖/撤
 
 static UIWindow *APLTopWindow(void) {
     if (@available(iOS 13.0, *)) {
@@ -95,54 +91,6 @@ static UIWindow *APLTopWindow(void) {
     }
     return [UIApplication sharedApplication].keyWindow;
 }
-
-// 把自己窗口截小图 → 高斯模糊 → 铺满用。
-// 1.3：底图从 1/8 提到 1/4、半径调小，让卡片上还能看出 App 的轮廓和颜色，不再是一片发白的糊。
-static UIImage *APLFrostedImage(UIWindow *window) {
-    if (window == nil) return nil;
-    CGRect bounds = window.bounds;
-    if (bounds.size.width < 8 || bounds.size.height < 8) return nil;
-
-    CGSize small = CGSizeMake(floor(bounds.size.width * 0.25), floor(bounds.size.height * 0.25));
-    if (small.width < 8) small.width = 8;
-    if (small.height < 8) small.height = 8;
-
-    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
-    format.scale = 1.0;
-    format.opaque = YES;
-    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:small format:format];
-
-    UIImage *snapshot = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
-        @try {
-            [window drawViewHierarchyInRect:CGRectMake(0, 0, small.width, small.height) afterScreenUpdates:NO];
-        } @catch (NSException *exception) {
-        }
-    }];
-    if (snapshot == nil || snapshot.CGImage == NULL) return nil;
-
-    CIImage *input = [CIImage imageWithCGImage:snapshot.CGImage];
-    if (input == nil) return snapshot;
-
-    CIFilter *blur = [CIFilter filterWithName:@"CIGaussianBlur"];
-    if (blur == nil) return snapshot;
-
-    [blur setValue:input forKey:kCIInputImageKey];
-    [blur setValue:@(9.0) forKey:kCIInputRadiusKey];
-    CIImage *output = [[blur outputImage] imageByCroppingToRect:input.extent];
-    if (output == nil) return snapshot;
-
-    if (gAPLBlurContext == nil) {
-        gAPLBlurContext = [CIContext contextWithOptions:nil];
-    }
-    CGImageRef image = [gAPLBlurContext createCGImage:output fromRect:input.extent];
-    if (image == NULL) return snapshot;
-
-    UIImage *result = [UIImage imageWithCGImage:image];
-    CGImageRelease(image);
-    return result ?: snapshot;
-}
-
-#pragma mark - 盖/撤
 
 static void APLRemoveOverlay(void) {
     if (gAPLOverlay == nil) return;
@@ -168,21 +116,8 @@ static void APLShowOverlay(void) {
     UIView *cover = [[UIView alloc] initWithFrame:window.bounds];
     cover.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     cover.userInteractionEnabled = YES;
-
-    UIImage *frosted = APLFrostedImage(window);
-    if (frosted != nil) {
-        UIImageView *imageView = [[UIImageView alloc] initWithImage:frosted];
-        imageView.frame = cover.bounds;
-        imageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        imageView.contentMode = UIViewContentModeScaleToFill;
-        imageView.layer.magnificationFilter = kCAFilterLinear;
-        [cover addSubview:imageView];
-    }
-
-    UIView *dim = [[UIView alloc] initWithFrame:cover.bounds];
-    dim.backgroundColor = [UIColor colorWithWhite:0.0 alpha:frosted ? 0.42 : 0.8];
-    dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [cover addSubview:dim];
+    // 整张不透明灰卡：不透明就代表底下任何内容都不会透出来，包括四角边缘的字
+    cover.backgroundColor = [UIColor colorWithRed:0.42 green:0.42 blue:0.44 alpha:1.0];
 
     UILabel *title = [[UILabel alloc] initWithFrame:CGRectZero];
     title.text = @"AppLock 已锁定";
@@ -194,7 +129,7 @@ static void APLShowOverlay(void) {
 
     UILabel *tip = [[UILabel alloc] initWithFrame:CGRectZero];
     tip.text = @"需要面容或密码验证";
-    tip.textColor = [UIColor colorWithWhite:1.0 alpha:0.78];
+    tip.textColor = [UIColor colorWithWhite:1.0 alpha:0.8];
     tip.font = [UIFont systemFontOfSize:15];
     tip.textAlignment = NSTextAlignmentCenter;
     tip.translatesAutoresizingMaskIntoConstraints = NO;
@@ -207,7 +142,6 @@ static void APLShowOverlay(void) {
         [tip.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:8],
     ]];
 
-    cover.alpha = 1.0;
     [window addSubview:cover];
     gAPLOverlay = cover;
 }

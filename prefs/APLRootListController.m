@@ -339,7 +339,7 @@ static BOOL APLRebuildFilterPlist(NSString **usedPath, NSString **errorMessage) 
                                                                     detail:Nil
                                                                       cell:PSButtonCell
                                                                       edit:Nil];
-        [diagnoseButton setProperty:@selector(rebuildFilterPressed:) forKey:@"action"];
+        [diagnoseButton setProperty:@"rebuildFilterPressed:" forKey:@"action"];
         [all addObject:diagnoseButton];
 
         _specifiers = all;

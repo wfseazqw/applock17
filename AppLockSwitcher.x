@@ -233,6 +233,16 @@ static void APLStopSync(void) {
     APLSyncCovers(self);
 }
 
+- (void)viewWillDisappear:(BOOL)animated {
+    %orig;
+    APLStopSync();
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    APLStopSync();
+}
+
 // 点击卡片打开 App 的入口
 - (void)didSelectContainer:(id)container modifierFlags:(long long)modifierFlags {
     if (!APLSwEnabled()) {
@@ -275,3 +285,29 @@ static void APLStopSync(void) {
 }
 
 %end
+
+// 只要有 App 抢到前台（或 SpringBoard 重新激活），立刻撤掉遮罩，避免盖到 App 本身
+%ctor {
+    @autoreleasepool {
+        if (![[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.springboard"]) return;
+        NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+        [center addObserverForName:UIApplicationWillResignActiveNotification
+                            object:nil
+                             queue:[NSOperationQueue mainQueue]
+                        usingBlock:^(NSNotification *note) {
+            APLStopSync();
+        }];
+        [center addObserverForName:UIApplicationDidBecomeActiveNotification
+                            object:nil
+                             queue:[NSOperationQueue mainQueue]
+                        usingBlock:^(NSNotification *note) {
+            APLStopSync();
+        }];
+        [center addObserverForName:UIApplicationDidEnterBackgroundNotification
+                            object:nil
+                             queue:[NSOperationQueue mainQueue]
+                        usingBlock:^(NSNotification *note) {
+            APLStopSync();
+        }];
+    }
+}

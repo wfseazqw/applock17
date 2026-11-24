@@ -5,15 +5,15 @@
 #import "PasswordManager.h"
 
 // 多任务（App 切换器）保护：
-// 1) 被锁 App 的卡片用独立置顶窗口盖住（能盖住实时画面层），看不见内容
-// 2) 从多任务点开被锁 App 时再次验证，验证通过用系统接口启动该 App
-// 全部在 SpringBoard 进程内完成，不依赖 App 内注入。
+// 1) 被锁 App 的卡片在切换器里盖上模糊层（遮罩挂在切换器窗口内，离开切换器自动撤掉，且不拦截触摸）
+// 2) 从多任务点开被锁 App 时再次验证，通过后用系统接口启动该 App
 
-static UIWindow *gCoverWindow = nil;
-static UIView *gCoverRoot = nil;
+#define APL_COVER_TAG 0x41504356
+
 static NSMutableDictionary<NSValue *, UIView *> *gCovers = nil;
-static CADisplayLink *gLink = nil;
+static __weak UIWindow *gHostWindow = nil;
 static __weak id gSwitcher = nil;
+static CADisplayLink *gLink = nil;
 
 @interface APLSyncDriver : NSObject
 @end
@@ -42,7 +42,6 @@ static BOOL APLAppLayoutLocked(id appLayout) {
     return NO;
 }
 
-// 从 appLayout 里取出被锁的那个包名
 static NSString *APLLockedBundleIDForLayout(id appLayout) {
     if (appLayout == nil) return nil;
     NSArray *locked = APLSwLockedIDs();
@@ -55,7 +54,6 @@ static NSString *APLLockedBundleIDForLayout(id appLayout) {
     return nil;
 }
 
-// 用系统接口启动 App（比复用点击方法可靠）
 static void APLOpenApplication(NSString *bundleID) {
     if (![bundleID isKindOfClass:[NSString class]]) return;
 
@@ -85,42 +83,23 @@ static void APLOpenApplication(NSString *bundleID) {
     }
 }
 
-static void APLCoverWindowSetup(void) {
-    if (gCoverWindow) return;
-
-    UIViewController *vc = [[UIViewController alloc] init];
-    vc.view.backgroundColor = [UIColor clearColor];
-    gCoverRoot = vc.view;
-
-    UIWindowScene *scene = nil;
-    for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
-        if ([s isKindOfClass:[UIWindowScene class]]) { scene = (UIWindowScene *)s; break; }
-    }
-    UIWindow *w = scene ? [[UIWindow alloc] initWithWindowScene:scene]
-                        : [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    w.windowLevel = 100000;
-    w.rootViewController = vc;
-    w.userInteractionEnabled = NO;
-    w.hidden = NO;
-
-    gCoverWindow = w;
-    gCovers = [NSMutableDictionary dictionary];
-}
-
 static UIView *APLMakeCover(CGRect frame, CGFloat cornerRadius) {
     UIView *cover = [[UIView alloc] initWithFrame:frame];
     cover.clipsToBounds = YES;
     cover.userInteractionEnabled = NO;
+    cover.tag = APL_COVER_TAG;
     cover.layer.cornerRadius = cornerRadius;
 
     UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleDark]];
     blur.frame = cover.bounds;
     blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    blur.userInteractionEnabled = NO;
     [cover addSubview:blur];
 
     UIView *dim = [[UIView alloc] initWithFrame:cover.bounds];
     dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45];
+    dim.userInteractionEnabled = NO;
     [cover addSubview:dim];
 
     return cover;
@@ -132,43 +111,62 @@ static void APLClearCovers(void) {
 }
 
 static void APLSyncCovers(id switcher) {
-    if (!APLSwEnabled()) { APLClearCovers(); return; }
     if (switcher == nil) return;
+    if (!APLSwEnabled()) { APLClearCovers(); return; }
+    if (gCovers == nil) gCovers = [NSMutableDictionary dictionary];
+
+    id (*msgID)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    id (*msgID_ID)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
 
     SEL selLayouts = NSSelectorFromString(@"appLayouts");
     SEL selContainer = NSSelectorFromString(@"_itemContainerForAppLayoutIfExists:");
     if (![switcher respondsToSelector:selLayouts] || ![switcher respondsToSelector:selContainer]) return;
 
-    APLCoverWindowSetup();
-    if (gCoverWindow.hidden) return;
+    UIView *switcherView = msgID(switcher, NSSelectorFromString(@"view"));
+    if (![switcherView isKindOfClass:[UIView class]]) { APLClearCovers(); return; }
 
-    id (*msgID)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
-    id (*msgID_ID)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
+    UIWindow *host = switcherView.window;
+    if (host == nil) { APLClearCovers(); gHostWindow = nil; return; }
+
+    // 宿主窗口换了，旧遮罩全部清掉
+    if (gHostWindow != host) { APLClearCovers(); gHostWindow = host; }
 
     NSArray *layouts = msgID(switcher, selLayouts);
     if (![layouts isKindOfClass:[NSArray class]]) { APLClearCovers(); return; }
 
+    CGRect screen = host.bounds;
     NSMutableSet<NSValue *> *liveKeys = [NSMutableSet set];
+
     for (id layout in layouts) {
         if (!APLAppLayoutLocked(layout)) continue;
+
         id container = msgID_ID(switcher, selContainer, layout);
         if (![container isKindOfClass:[UIView class]]) continue;
+
         UIView *card = (UIView *)container;
         if (card.window == nil) continue;
 
-        CGRect frame = [card convertRect:card.bounds toView:nil];
-        if (frame.size.width < 40 || frame.size.height < 40) continue;
+        CGRect frame = [card convertRect:card.bounds toView:host];
 
+        // 卡片不在屏幕里（多任务已退出 / App 已打开 / 回到桌面）就不盖
+        CGRect visible = CGRectIntersection(frame, screen);
+        if (CGRectIsNull(visible) || visible.size.width < 60 || visible.size.height < 60) continue;
+
+        CGFloat radius = card.layer.cornerRadius > 0 ? card.layer.cornerRadius : 26.0;
         NSValue *key = [NSValue valueWithPointer:(__bridge const void *)card];
         UIView *cover = gCovers[key];
         if (cover == nil) {
-            CGFloat radius = card.layer.cornerRadius > 0 ? card.layer.cornerRadius : 26.0;
             cover = APLMakeCover(frame, radius);
-            [gCoverRoot addSubview:cover];
+            [host addSubview:cover];
             gCovers[key] = cover;
+        } else if (cover.superview != host) {
+            [cover removeFromSuperview];
+            [host addSubview:cover];
         }
         cover.frame = frame;
-        cover.layer.cornerRadius = card.layer.cornerRadius > 0 ? card.layer.cornerRadius : 26.0;
+        cover.layer.cornerRadius = radius;
+        cover.hidden = NO;
+        [host bringSubviewToFront:cover];
         [liveKeys addObject:key];
     }
 
@@ -178,6 +176,10 @@ static void APLSyncCovers(id switcher) {
             [gCovers removeObjectForKey:key];
         }
     }
+}
+
+static void APLSetCoversHidden(BOOL hidden) {
+    for (UIView *cover in gCovers.allValues) cover.hidden = hidden;
 }
 
 static void APLStartSync(id switcher) {
@@ -192,6 +194,7 @@ static void APLStopSync(void) {
     [gLink invalidate];
     gLink = nil;
     APLClearCovers();
+    gHostWindow = nil;
 }
 
 @implementation APLSyncDriver
@@ -213,7 +216,6 @@ static void APLStopSync(void) {
 
 %hook SBFluidSwitcherViewController
 
-// 卡片位置变化时同步遮罩
 - (void)_updateVisibleAdjustedAppLayouts {
     %orig;
     APLStartSync(self);
@@ -223,6 +225,7 @@ static void APLStopSync(void) {
 - (void)layoutStateTransitionCoordinator:(id)coordinator transitionDidBeginWithTransitionContext:(id)context {
     %orig;
     APLStartSync(self);
+    APLSyncCovers(self);
 }
 
 - (void)layoutStateTransitionCoordinator:(id)coordinator transitionDidEndWithTransitionContext:(id)context {
@@ -237,13 +240,14 @@ static void APLStopSync(void) {
         return;
     }
 
+    id switcher = (id)self;
+    id (*msgID)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    id (*msgID_ID)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
+
     SEL selLayouts = NSSelectorFromString(@"appLayouts");
     SEL selForLayout = NSSelectorFromString(@"_itemContainerForAppLayoutIfExists:");
-    id switcher = (id)self;
     id appLayout = nil;
     if ([switcher respondsToSelector:selLayouts] && [switcher respondsToSelector:selForLayout]) {
-        id (*msgID)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
-        id (*msgID_ID)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
         NSArray *layouts = msgID(switcher, selLayouts);
         for (id layout in layouts) {
             if (msgID_ID(switcher, selForLayout, layout) == container) { appLayout = layout; break; }
@@ -256,16 +260,16 @@ static void APLStopSync(void) {
         return;
     }
 
-    // 验证期间先收起遮罩，避免挡住面容识别面板
-    if (gCoverWindow) gCoverWindow.hidden = YES;
+    // 验证期间先收遮罩，避免挡住面容面板
+    APLSetCoversHidden(YES);
 
     [[PasswordManager sharedInstance] authenticate:^(BOOL isAuthenticated, NSError *authenticationError) {
         if (isAuthenticated) {
             APLClearCovers();
             APLOpenApplication(bundleID);
         } else {
-            if (gCoverWindow) gCoverWindow.hidden = NO;
-            APLSyncCovers(self);
+            APLSetCoversHidden(NO);
+            APLSyncCovers(switcher);
         }
     }];
 }

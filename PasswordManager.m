@@ -1,5 +1,14 @@
 #import "PasswordManager.h" 
 
+// 验证结果的回调可能在后台线程，触碰 UI / 打开 App 必须回到主线程
+static void APLRunOnMainThread(void(^block)(void)) {
+    if([NSThread isMainThread]) {
+        block();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), block);
+    }
+}
+
 @implementation PasswordManager
 
 + (id)sharedInstance {
@@ -27,7 +36,9 @@
     if (isBiometricsEnabled == true) {
         [self checkBiometrics:^(BOOL isBiometricsCorrect, NSError *checkError) {
             if (isBiometricsCorrect == true) {
-                completion(isBiometricsCorrect, checkError);
+                APLRunOnMainThread(^{
+                    completion(isBiometricsCorrect, checkError);
+                });
             }
         }];
     }
@@ -35,7 +46,9 @@
     if (isPasscodeEnabled == true) {
         [self checkForPassword:appLockPasscode withCompletion:^(BOOL isPasswordCorrect) {
             if (isPasswordCorrect == true) {
-                completion(isPasswordCorrect, nil);
+                APLRunOnMainThread(^{
+                    completion(isPasswordCorrect, nil);
+                });
             }
         }];
     }
@@ -54,10 +67,12 @@
                 completion(success, error);
         }];
     } else {
-        UIViewController *rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
         NSString *alertTitle = @"错误";
         NSString *alertMessage = @"未检测到生物识别，请先在 设置 中启用面容 ID 或触控 ID";
-        [UIAlertController showAlertControllerWithVC:rootVC withMessage:alertMessage withTitle:alertTitle];
+        APLRunOnMainThread(^{
+            UIViewController *rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
+            [UIAlertController showAlertControllerWithVC:rootVC withMessage:alertMessage withTitle:alertTitle];
+        });
         //don't run completion biometrics is not availalbe
         // completion(isBiometricsCorrect, nil); 
     }
@@ -65,19 +80,19 @@
 
 
 -(void)checkForPassword:(NSString *)password withCompletion:(void(^)(BOOL isPasswordCorrect))completion {
-   UIViewController *rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
+    APLRunOnMainThread(^{
+        UIViewController *rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
 
-    [self showAlertControllerPasswordCheckerWithVC:rootVC withCompletion:^(UIAlertController *alertController) {
-        UITextField *textField = alertController.textFields[0];
-        NSString *passwordInput = textField.text;
-        if ([passwordInput isEqual:password]) {
-            completion(true);
-        } else {
-            completion(false);
-        }
-    }];
-    
-
+        [self showAlertControllerPasswordCheckerWithVC:rootVC withCompletion:^(UIAlertController *alertController) {
+            UITextField *textField = alertController.textFields[0];
+            NSString *passwordInput = textField.text;
+            if ([passwordInput isEqual:password]) {
+                completion(true);
+            } else {
+                completion(false);
+            }
+        }];
+    });
 }
 
 

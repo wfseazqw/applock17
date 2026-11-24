@@ -157,6 +157,84 @@ UITableView *myTableView;
     return group;
 }
 
+//MARK: 注入名单文件定位与重建
+
+static NSString *APLOwnExecutablePath(void) {
+    Dl_info info;
+    if(dladdr((const void *)&APLOwnExecutablePath, &info) == 0 || info.dli_fname == NULL) return nil;
+    return [NSString stringWithUTF8String:info.dli_fname];
+}
+
+static NSArray<NSString *> *APLFilterPlistCandidates(void) {
+    NSMutableArray *candidates = [NSMutableArray array];
+    NSString *executable = APLOwnExecutablePath();
+    if(executable.length) {
+        NSString *bundleDir = [executable stringByDeletingLastPathComponent];                              // .../Prefs.bundle
+        NSString *bundleParentDir = [bundleDir stringByDeletingLastPathComponent];                          // .../PreferenceBundles
+        NSString *libraryDir = [bundleParentDir stringByDeletingLastPathComponent];                         // .../Library
+        NSString *rootDir = [libraryDir stringByDeletingLastPathComponent];                                 // 越狱根
+        [candidates addObject:[libraryDir stringByAppendingPathComponent:@"MobileSubstrate/DynamicLibraries/AppLock.plist"]];
+        [candidates addObject:[rootDir stringByAppendingPathComponent:@"usr/lib/TweakInject/AppLock.plist"]];
+        [candidates addObject:[rootDir stringByAppendingPathComponent:@"Library/MobileSubstrate/DynamicLibraries/AppLock.plist"]];
+    }
+    [candidates addObject:@"/usr/lib/TweakInject/AppLock.plist"];
+    [candidates addObject:@"/Library/MobileSubstrate/DynamicLibraries/AppLock.plist"];
+    [candidates addObject:@"/var/jb/usr/lib/TweakInject/AppLock.plist"];
+    return candidates;
+}
+
+// 在候选路径里找出真实存在的注入名单文件
+static NSString *APLExistingFilterPlistPath(void) {
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    for(NSString *path in APLFilterPlistCandidates()) {
+        BOOL isDirectory = NO;
+        if([fileManager fileExistsAtPath:path isDirectory:&isDirectory] && !isDirectory) {
+            return path;
+        }
+    }
+    return nil;
+}
+
+// 按当前勾选名单重建注入名单文件
+static BOOL APLRebuildFilterPlist(NSString **usedPath, NSString **errorMessage) {
+    NSString *path = APLExistingFilterPlistPath();
+    if(!path.length) {
+        if(errorMessage) *errorMessage = @"没找到注入名单文件";
+        return NO;
+    }
+    if(usedPath) *usedPath = path;
+
+    NSArray *locked = [[[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN_IS_ENABLED] objectForKey:BUNDLE_DEFAULTS_IS_ENABLED_KEY];
+    if(![locked isKindOfClass:[NSArray class]]) locked = @[];
+
+    NSMutableArray *bundles = [NSMutableArray arrayWithObjects:@"com.apple.springboard", @"com.apple.Spotlight", nil];
+    for(id item in locked) {
+        if(![item isKindOfClass:[NSString class]]) continue;
+        NSString *bundleID = (NSString *)item;
+        if(!bundleID.length) continue;
+        if([bundleID hasPrefix:@"com.apple."]) continue;
+        if([bundles containsObject:bundleID]) continue;
+        [bundles addObject:bundleID];
+    }
+
+    NSDictionary *filterDictionary = @{ @"Filter" : @{ @"Bundles" : bundles } };
+    NSData *plistData = [NSPropertyListSerialization dataWithPropertyList:filterDictionary
+                                                                    format:NSPropertyListXMLFormat_v1_0
+                                                                   options:0
+                                                                     error:NULL];
+    if(!plistData) {
+        if(errorMessage) *errorMessage = @"名单序列化失败";
+        return NO;
+    }
+
+    NSError *writeError = nil;
+    BOOL written = [plistData writeToFile:path options:NSDataWritingAtomic error:&writeError];
+    if(!written && errorMessage) {
+        *errorMessage = writeError.localizedDescription ?: @"写入失败（可能没有写权限）";
+    }
+    return written;
+}
+
 //MARK: 勾选状态读写
 
 -(NSArray *)lockedBundleIDs {
@@ -190,6 +268,42 @@ UITableView *myTableView;
         [locked removeObject:bundleID];
     }
     [self saveLockedBundleIDs:locked];
+
+    // 立刻按新名单重建注入名单文件，省得等下次注销才更新
+    NSString *usedPath = nil;
+    NSString *errorMessage = nil;
+    APLRebuildFilterPlist(&usedPath, &errorMessage);
+}
+
+//MARK: 诊断 / 重建注入名单
+
+-(NSArray *)bundlesInFilterPlist:(NSString *)path {
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if(!data) return @[];
+    id plist = [NSPropertyListSerialization propertyListWithData:data options:0 format:NULL error:NULL];
+    if(![plist isKindOfClass:[NSDictionary class]]) return @[];
+    id bundles = ((NSDictionary *)plist)[@"Filter"][@"Bundles"];
+    return [bundles isKindOfClass:[NSArray class]] ? bundles : @[];
+}
+
+-(void)rebuildFilterPressed:(PSSpecifier *)specifier {
+    NSString *usedPath = nil;
+    NSString *errorMessage = nil;
+    BOOL ok = APLRebuildFilterPlist(&usedPath, &errorMessage);
+
+    NSString *message = nil;
+    if(ok) {
+        message = [NSString stringWithFormat:@"注入名单已重建\n%@\n\n当前注入：\n%@", usedPath, [[self bundlesInFilterPlist:usedPath] componentsJoinedByString:@"\n"]];
+    } else {
+        message = [NSString stringWithFormat:@"重建失败：%@", errorMessage];
+    }
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"注入名单" message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"拷贝" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [UIPasteboard generalPasteboard].string = message;
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 //MARK: specifiers
@@ -207,6 +321,26 @@ UITableView *myTableView;
         [all addObjectsFromArray:[self appGroupWithTitle:@"系统应用"
                                                  footer:nil
                                              systemApps:YES]];
+
+        PSSpecifier *diagnoseHeader = [PSSpecifier preferenceSpecifierNamed:@"注入名单"
+                                                                   target:self
+                                                                      set:nil
+                                                                      get:nil
+                                                                   detail:Nil
+                                                                     cell:PSGroupCell
+                                                                     edit:Nil];
+        [diagnoseHeader setProperty:@"改动勾选后如果没生效，点下面按钮当场重建名单，再注销设备。" forKey:@"footerText"];
+        [all addObject:diagnoseHeader];
+
+        PSSpecifier *diagnoseButton = [PSSpecifier preferenceSpecifierNamed:@"检查并重建注入名单"
+                                                                    target:self
+                                                                       set:nil
+                                                                       get:nil
+                                                                    detail:Nil
+                                                                      cell:PSButtonCell
+                                                                      edit:Nil];
+        [diagnoseButton setProperty:@selector(rebuildFilterPressed:) forKey:@"action"];
+        [all addObject:diagnoseButton];
 
         _specifiers = all;
     }

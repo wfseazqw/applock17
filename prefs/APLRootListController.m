@@ -277,6 +277,17 @@ static BOOL APLRebuildFilterPlist(NSString **usedPath, NSString **errorMessage) 
 
 //MARK: 诊断 / 重建注入名单
 
+-(NSString *)syncReportSummary {
+    NSDictionary *report = [[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN_IS_ENABLED][@"syncReport"];
+    if(![report isKindOfClass:[NSDictionary class]]) {
+        return @"还没有 SpringBoard 的记录：先点右上角“注销”一次，注销回来再看这里。";
+    }
+    NSString *written = [report[@"written"] boolValue] ? @"成功" : @"失败";
+    NSString *bundles = [report[@"bundles"] isKindOfClass:[NSArray class]] ? [report[@"bundles"] componentsJoinedByString:@", "] : @"";
+    return [NSString stringWithFormat:@"SpringBoard 上次启动记录\n文件：%@\n写入：%@\n注入：%@\n备注：%@\n（点这一行可看目录详情）",
+            report[@"path"], written, bundles, report[@"detail"]];
+}
+
 -(NSArray *)bundlesInFilterPlist:(NSString *)path {
     NSData *data = [NSData dataWithContentsOfFile:path];
     if(!data) return @[];
@@ -325,6 +336,9 @@ static BOOL APLRebuildFilterPlist(NSString **usedPath, NSString **errorMessage) 
 
 //MARK: specifiers
 
+static PSSpecifier *diagnoseHeaderSpecifier;
+static NSString *const APLDiagnoseButtonTitle = @"检查并重建注入名单";
+
 - (NSMutableArray *)specifiers {
     if(!_specifiers) {
         NSMutableArray *all = [NSMutableArray array];
@@ -347,16 +361,17 @@ static BOOL APLRebuildFilterPlist(NSString **usedPath, NSString **errorMessage) 
                                                                      cell:PSGroupCell
                                                                      edit:Nil];
         [diagnoseHeader setProperty:@"改动勾选后如果没生效，点下面按钮当场重建名单，再注销设备。" forKey:@"footerText"];
+        diagnoseHeaderSpecifier = diagnoseHeader;
         [all addObject:diagnoseHeader];
 
-        PSSpecifier *diagnoseButton = [PSSpecifier preferenceSpecifierNamed:@"检查并重建注入名单"
+        PSSpecifier *diagnoseButton = [PSSpecifier preferenceSpecifierNamed:APLDiagnoseButtonTitle
                                                                     target:self
                                                                        set:nil
                                                                        get:nil
                                                                     detail:Nil
                                                                       cell:PSButtonCell
                                                                       edit:Nil];
-        [diagnoseButton setProperty:@"rebuildFilterPressed:" forKey:@"action"];
+        [diagnoseButton setProperty:@YES forKey:@"enabled"];
         [all addObject:diagnoseButton];
 
         _specifiers = all;
@@ -489,6 +504,25 @@ static BOOL APLRebuildFilterPlist(NSString **usedPath, NSString **errorMessage) 
 }
 
 //MARK: tableView delegate
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    if(diagnoseHeaderSpecifier) {
+        [diagnoseHeaderSpecifier setProperty:[self syncReportSummary] forKey:@"footerText"];
+        [self reloadSpecifier:diagnoseHeaderSpecifier];
+    }
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [super tableView:tableView didSelectRowAtIndexPath:indexPath];
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+
+    UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+    NSString *title = cell.textLabel.text ?: @"";
+    if([title isEqualToString:APLDiagnoseButtonTitle]) {
+        [self rebuildFilterPressed:nil];
+    }
+}
 
 - (void)tableView:(UITableView *)tableView
   willDisplayCell:(UITableViewCell *)cell

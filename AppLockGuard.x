@@ -17,10 +17,6 @@ static BOOL APLIsLockedBundle(NSString *bundleID) {
     return [lockedBundleIDs isKindOfClass:[NSArray class]] && [lockedBundleIDs containsObject:bundleID];
 }
 
-static NSString *APLOwnBundleID(void) {
-    return [[NSBundle mainBundle] bundleIdentifier];
-}
-
 // 只有「普通 App 进程 + 总开关开着 + 自己被勾选锁定」这一种情况才动手
 static BOOL APLShouldGuard(void) {
     if (NSClassFromString(@"UIApplication") == nil) return NO;

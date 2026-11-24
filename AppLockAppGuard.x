@@ -96,13 +96,14 @@ static UIWindow *APLTopWindow(void) {
     return [UIApplication sharedApplication].keyWindow;
 }
 
-// 把自己窗口截小图 → 高斯模糊 → 铺满用。缩到 1/8 左右再模糊，几十毫秒内就能做完。
+// 把自己窗口截小图 → 高斯模糊 → 铺满用。
+// 1.3：底图从 1/8 提到 1/4、半径调小，让卡片上还能看出 App 的轮廓和颜色，不再是一片发白的糊。
 static UIImage *APLFrostedImage(UIWindow *window) {
     if (window == nil) return nil;
     CGRect bounds = window.bounds;
     if (bounds.size.width < 8 || bounds.size.height < 8) return nil;
 
-    CGSize small = CGSizeMake(floor(bounds.size.width * 0.12), floor(bounds.size.height * 0.12));
+    CGSize small = CGSizeMake(floor(bounds.size.width * 0.25), floor(bounds.size.height * 0.25));
     if (small.width < 8) small.width = 8;
     if (small.height < 8) small.height = 8;
 
@@ -126,7 +127,7 @@ static UIImage *APLFrostedImage(UIWindow *window) {
     if (blur == nil) return snapshot;
 
     [blur setValue:input forKey:kCIInputImageKey];
-    [blur setValue:@(7.0) forKey:kCIInputRadiusKey];
+    [blur setValue:@(9.0) forKey:kCIInputRadiusKey];
     CIImage *output = [[blur outputImage] imageByCroppingToRect:input.extent];
     if (output == nil) return snapshot;
 
@@ -179,7 +180,7 @@ static void APLShowOverlay(void) {
     }
 
     UIView *dim = [[UIView alloc] initWithFrame:cover.bounds];
-    dim.backgroundColor = [UIColor colorWithWhite:0.0 alpha:frosted ? 0.22 : 0.75];
+    dim.backgroundColor = [UIColor colorWithWhite:0.0 alpha:frosted ? 0.42 : 0.8];
     dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [cover addSubview:dim];
 

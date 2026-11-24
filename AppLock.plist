@@ -1,5 +1,6 @@
-{
-    Filter = {
-        Bundles = ( "com.apple.springboard", "com.apple.Spotlight", "com.apple.Preferences", "com.adb.aimaTravel" );
-    };
+{ 
+    
+Filter = { 
+            Bundles = ( "com.apple.Spotlight", "com.apple.springboard"); 
+         }; 
 }

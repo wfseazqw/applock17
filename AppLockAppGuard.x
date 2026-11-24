@@ -5,28 +5,35 @@
 // 应用锁 —— App 自身进程内的“糊屏”
 // 只负责一件事：这个 App 被勾选为加锁时，退到后台（含打开多任务界面）就在它自己的窗口上盖一层毛玻璃，
 // 系统给多任务卡片拍照时拍到的就是这层糊图；回到前台就撤掉（验证已在 SpringBoard 先做过）。
-// 2.0.1：全 App 注入后，App 进程内到底读不读得到勾选名单，用一个自检小面板直接显示出来，不再靠猜。
+// 2.0.3 正式版：
+//   App 进程被沙盒限制，读不到设置页那份名单（com.applock.prefs 三种读法实测都拿不到），
+//   所以改由 SpringBoard 把“锁/不锁”写进每个 App 自己的容器，App 只读自己的文件。
 
 static UIVisualEffectView *gAPLOverlay = nil;
-static UILabel *gAPLDiagLabel = nil;
 
-#pragma mark - 三种读法
+#pragma mark - 读状态
 
-static NSString *const kAPLMasterDomain = @"com.applock.prefs.isTweakOn";
-static NSString *const kAPLListDomain = @"com.applock.prefs";
+static NSString *const kAPLStateFileName = @"com.applock.state.plist";
+static NSString *const kAPLGlobalPrefsPath = @"/var/mobile/Library/Preferences/com.applock.state.plist";
+static NSString *const kAPLGlobalTmpPath = @"/private/var/tmp/com.applock.state.plist";
 
-static NSArray *APLListViaNSUserDefaults(void) {
-    id value = [[NSUserDefaults standardUserDefaults] persistentDomainForName:kAPLListDomain][BUNDLE_DEFAULTS_IS_ENABLED_KEY];
-    return [value isKindOfClass:[NSArray class]] ? value : nil;
+// 自己容器里的状态（SpringBoard 写的，沙盒内一定读得到）
+static NSDictionary *APLOwnState(void) {
+    NSString *library = [NSHomeDirectory() stringByAppendingPathComponent:@"Library"];
+    NSString *path = [[library stringByAppendingPathComponent:@"Preferences"] stringByAppendingPathComponent:kAPLStateFileName];
+    NSDictionary *state = [NSDictionary dictionaryWithContentsOfFile:path];
+    return [state isKindOfClass:[NSDictionary class]] ? state : nil;
 }
 
-static NSNumber *APLMasterViaNSUserDefaults(void) {
-    id value = [[NSUserDefaults standardUserDefaults] persistentDomainForName:kAPLMasterDomain][TWEAK_SPECIFIER_KEY];
-    return [value isKindOfClass:[NSNumber class]] ? value : nil;
+static NSDictionary *APLGlobalState(NSString *path) {
+    NSDictionary *state = [NSDictionary dictionaryWithContentsOfFile:path];
+    return [state isKindOfClass:[NSDictionary class]] ? state : nil;
 }
+
+#pragma mark - 名单兜底（正常用不到，容器状态读不到时才走）
 
 static NSArray *APLListViaCFPreferences(void) {
-    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("switchIsEnabled"), (__bridge CFStringRef)kAPLListDomain);
+    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("switchIsEnabled"), CFSTR("com.applock.prefs"));
     NSArray *result = nil;
     if (value != NULL) {
         if (CFGetTypeID(value) == CFArrayGetTypeID()) {
@@ -37,8 +44,25 @@ static NSArray *APLListViaCFPreferences(void) {
     return result;
 }
 
+static NSArray *APLListViaNSUserDefaults(void) {
+    id value = [[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN_IS_ENABLED][BUNDLE_DEFAULTS_IS_ENABLED_KEY];
+    return [value isKindOfClass:[NSArray class]] ? value : nil;
+}
+
+static NSArray *APLListViaFile(void) {
+    NSArray *dirs = @[ @"/var/mobile/Library/Preferences", @"/var/jb/var/mobile/Library/Preferences" ];
+    for (NSString *dir in dirs) {
+        NSString *path = [dir stringByAppendingPathComponent:@"com.applock.prefs.plist"];
+        NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:path];
+        if (![dict isKindOfClass:[NSDictionary class]]) continue;
+        id value = dict[BUNDLE_DEFAULTS_IS_ENABLED_KEY];
+        if ([value isKindOfClass:[NSArray class]]) return value;
+    }
+    return nil;
+}
+
 static NSNumber *APLMasterViaCFPreferences(void) {
-    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("isTweakEnabled"), (__bridge CFStringRef)kAPLMasterDomain);
+    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("isTweakEnabled"), CFSTR("com.applock.prefs.isTweakOn"));
     NSNumber *result = nil;
     if (value != NULL) {
         CFTypeID type = CFGetTypeID(value);
@@ -54,64 +78,17 @@ static NSNumber *APLMasterViaCFPreferences(void) {
     return result;
 }
 
-// 直接读文件：给自检面板用，同时作为最后的兜底读法
-static NSString *gAPLReadPath = nil;
-
-static NSDictionary *APLReadPlistFile(NSString *domain) {
-    NSArray *dirs = @[ @"/var/mobile/Library/Preferences",
-                       @"/var/jb/var/mobile/Library/Preferences" ];
-    for (NSString *dir in dirs) {
-        NSString *path = [dir stringByAppendingPathComponent:[domain stringByAppendingString:@".plist"]];
-        if (![[NSFileManager defaultManager] fileExistsAtPath:path]) continue;
-        NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:path];
-        if (dict == nil) continue;
-        if (gAPLReadPath == nil) gAPLReadPath = path;
-        return dict;
-    }
-    return nil;
-}
-
-static NSArray *APLListViaFile(void) {
-    id value = APLReadPlistFile(kAPLListDomain)[BUNDLE_DEFAULTS_IS_ENABLED_KEY];
-    return [value isKindOfClass:[NSArray class]] ? value : nil;
-}
-
-static NSNumber *APLMasterViaFile(void) {
-    id value = APLReadPlistFile(kAPLMasterDomain)[TWEAK_SPECIFIER_KEY];
-    return [value isKindOfClass:[NSNumber class]] ? value : nil;
-}
-
 #pragma mark - 判定
 
-// 2.0.2：SpringBoard 会把“锁/不锁”写进本 App 自己的容器，这是沙盒内一定能读到的位置
-static NSString *APLOwnStatePath(void) {
-    NSString *library = [NSHomeDirectory() stringByAppendingPathComponent:@"Library"];
-    return [[library stringByAppendingPathComponent:@"Preferences"]
-            stringByAppendingPathComponent:@"com.applock.state.plist"];
-}
-
-static NSDictionary *APLOwnState(void) {
-    NSDictionary *state = [NSDictionary dictionaryWithContentsOfFile:APLOwnStatePath()];
-    return [state isKindOfClass:[NSDictionary class]] ? state : nil;
-}
-
-// SpringBoard 额外写的两份全局状态，容器写不进去时用
-static NSString *const kAPLGlobalPrefsPath = @"/var/mobile/Library/Preferences/com.applock.state.plist";
-static NSString *const kAPLGlobalTmpPath = @"/private/var/tmp/com.applock.state.plist";
-
-static NSDictionary *APLGlobalState(NSString *path) {
-    NSDictionary *state = [NSDictionary dictionaryWithContentsOfFile:path];
-    return [state isKindOfClass:[NSDictionary class]] ? state : nil;
-}
-
-static NSString *gAPLStateSource = @"无";   // 自检面板用：这次是从哪儿判断出来的
-
+// 这个 App 现在要不要糊屏
+// 1) 自己容器里的状态文件（SpringBoard 写的，最可靠的通道）
+// 2) tmp / 偏好目录里的全局状态
+// 3) 都读不到才退回原来的跨域读法
 static BOOL APLShouldProtectSelf(void) {
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
 
     NSDictionary *ownState = APLOwnState();
     if (ownState != nil) {
-        gAPLStateSource = @"容器";
         return [ownState[@"locked"] boolValue];
     }
 
@@ -122,59 +99,22 @@ static BOOL APLShouldProtectSelf(void) {
         if (![apps isKindOfClass:[NSDictionary class]]) continue;
         id value = bundleID ? apps[bundleID] : nil;
         if ([value isKindOfClass:[NSNumber class]]) {
-            gAPLStateSource = [path isEqualToString:kAPLGlobalTmpPath] ? @"tmp" : @"偏好目录";
             return [value boolValue];
         }
     }
 
-    gAPLStateSource = @"名单";
     NSArray *locked = APLListViaCFPreferences();
     if (locked == nil) locked = APLListViaNSUserDefaults();
     if (locked == nil) locked = APLListViaFile();
+    if (![locked isKindOfClass:[NSArray class]]) return NO;
 
     NSNumber *master = APLMasterViaCFPreferences();
-    if (master == nil) master = APLMasterViaNSUserDefaults();
-    if (master == nil) master = APLMasterViaFile();
     if (master != nil && ![master boolValue]) return NO;
-
     if (!bundleID.length) return NO;
-    if (![locked isKindOfClass:[NSArray class]]) return NO;
     return [locked containsObject:bundleID];
 }
 
-#pragma mark - 自检面板
-
-static NSString *APLYesNo(BOOL value) {
-    return value ? @"读到了" : @"没读到";
-}
-
-static NSString *APLDiagText(void) {
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"(无)";
-
-    NSDictionary *ownState = APLOwnState();
-    NSDictionary *tmpState = APLGlobalState(kAPLGlobalTmpPath);
-    NSDictionary *prefsState = APLGlobalState(kAPLGlobalPrefsPath);
-
-    NSArray *cfList = APLListViaCFPreferences();
-    NSArray *udList = APLListViaNSUserDefaults();
-    NSArray *fileList = APLListViaFile();
-
-    BOOL hit = APLShouldProtectSelf();
-
-    NSMutableString *text = [NSMutableString string];
-    [text appendFormat:@"AppLock 2.0.2 自检\n本App：%@\n", bundleID];
-    [text appendFormat:@"判定来源：%@ → 糊屏%@\n", gAPLStateSource, hit ? @"开" : @"关"];
-    [text appendFormat:@"容器状态:%@ tmp:%@ 偏好目录:%@\n",
-        ownState ? @"有" : @"无", tmpState ? @"有" : @"无", prefsState ? @"有" : @"无"];
-    if (ownState) {
-        [text appendFormat:@"容器 locked:%@\n", [ownState[@"locked"] boolValue] ? @"1" : @"0"];
-    }
-    [text appendFormat:@"名单 CF:%@(%lu) NS:%@(%lu) 文件:%@(%lu)",
-        APLYesNo(cfList != nil), (unsigned long)cfList.count,
-        APLYesNo(udList != nil), (unsigned long)udList.count,
-        APLYesNo(fileList != nil), (unsigned long)fileList.count];
-    return text;
-}
+#pragma mark - 糊屏
 
 static UIWindow *APLTopWindow(void) {
     if (@available(iOS 13.0, *)) {
@@ -187,36 +127,6 @@ static UIWindow *APLTopWindow(void) {
     }
     return [UIApplication sharedApplication].keyWindow;
 }
-
-static void APLUpdateDiagPanel(void) {
-    UIWindow *window = APLTopWindow();
-    if (window == nil) return;
-
-    if (gAPLDiagLabel == nil) {
-        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(8, 52, window.bounds.size.width - 16, 0)];
-        label.numberOfLines = 0;
-        label.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
-        label.textColor = [UIColor whiteColor];
-        label.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.75];
-        label.layer.cornerRadius = 6;
-        label.layer.masksToBounds = YES;
-        label.userInteractionEnabled = NO;
-        gAPLDiagLabel = label;
-    }
-    gAPLDiagLabel.text = APLDiagText();
-    [gAPLDiagLabel sizeToFit];
-    CGRect frame = gAPLDiagLabel.frame;
-    frame.origin = CGPointMake(8, 52);
-    frame.size.width = window.bounds.size.width - 16;
-    gAPLDiagLabel.frame = frame;
-
-    if (gAPLDiagLabel.superview != window) {
-        [window addSubview:gAPLDiagLabel];
-    }
-    [window bringSubviewToFront:gAPLDiagLabel];
-}
-
-#pragma mark - 糊屏
 
 static void APLRemoveOverlay(void) {
     if (gAPLOverlay == nil) return;
@@ -302,9 +212,6 @@ __attribute__((constructor)) static void APLAppGuardInit(void) {
                                                               queue:[NSOperationQueue mainQueue]
                                                          usingBlock:^(NSNotification *note) {
                 APLRemoveOverlay();
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    APLUpdateDiagPanel();
-                });
             }];
         });
     }

@@ -7,5 +7,6 @@ Prefs_FRAMEWORKS = UIKit
 Prefs_PRIVATE_FRAMEWORKS = Preferences
 Prefs_INSTALL_PATH = /Library/PreferenceBundles
 Prefs_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -idirafter $(THEOS_PROJECT_DIR)/vendor
+Prefs_LDFLAGS = -undefined dynamic_lookup
 
 include $(THEOS_MAKE_PATH)/bundle.mk

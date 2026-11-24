@@ -1,0 +1,57 @@
+name: build-roothide-deb
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install GNU make and packaging tools
+        run: |
+          brew install make ldid xz dpkg
+          echo "PATH=$(brew --prefix)/opt/make/libexec/gnubin:$PATH" >> $GITHUB_ENV
+
+      - name: Install RootHide Theos
+        run: |
+          set -euo pipefail
+          git clone --recursive https://github.com/roothide/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          echo "$HOME/theos/bin" >> "$GITHUB_PATH"
+          ls "$HOME/theos"
+
+      - name: Setup iOS SDK
+        run: |
+          set -euo pipefail
+          mkdir -p "$THEOS/sdks"
+          curl -fL -o /tmp/sdk.tar.xz https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz
+          tar -xJf /tmp/sdk.tar.xz -C "$THEOS/sdks"
+          ls "$THEOS/sdks"
+
+      - name: Check vendored headers
+        run: |
+          ls vendor/AltList
+          ls vendor/MobileCoreServices
+
+      - name: Build RootHide package
+        run: |
+          make clean || true
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+
+      - name: Show package info
+        run: |
+          ls -lh packages/
+          dpkg-deb -I packages/*.deb
+
+      - name: Upload deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: roothide-deb
+          path: packages/*.deb

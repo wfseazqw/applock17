@@ -1,6 +1,15 @@
+//
+//  APLRootListController.m
+//  Prefs
+//
+//  重写版：不再依赖 AltList 框架，由面板自己枚举已安装的 App 生成列表。
+//  勾选结果仍写入 com.applock.prefs 的 switchIsEnabled 数组，与插件本体的读取方式保持一致。
+//
+
 #import <Foundation/Foundation.h>
 #import "APLRootListController.h"
 #import <Preferences/Preferences.h>
+#import <MobileCoreServices/LSApplicationWorkspace.h>
 
 static PSSpecifier *tweakEnabledSpecifier;
 static PSSpecifier *biometricsSpecifier;
@@ -15,262 +24,295 @@ UITableView *myTableView;
 @implementation APLRootListController
 
 -(instancetype)init {
-	self = [super init];
-    if (self) {
-        NSLog(@"init called successfully");
-		[self createCustomSpecifiers];
+    self = [super init];
+    if(self) {
+        [self createCustomSpecifiers];
     }
     return self;
 }
 
 -(void)createCustomSpecifiers {
-	tweakEnabledSpecifier = [PSSpecifier preferenceSpecifierNamed:@"启用"
-									target:self
-									set:@selector(setPreferenceValue:specifier:)
-									get:@selector(readPreferenceValue:)
-									detail:Nil
-									cell:PSSwitchCell
-									edit:Nil];
-	[tweakEnabledSpecifier setProperty:USER_DEFAULTS_DOMAIN forKey:@"defaults"];
-	[tweakEnabledSpecifier setProperty:TWEAK_SPECIFIER_KEY forKey:@"key"];
-	[biometricsSpecifier setProperty:@YES forKey:@"default"];
-	[tweakEnabledSpecifier setProperty:@"tweakEnabledSpecifier" forKey:@"PostNotification"];
+    tweakEnabledSpecifier = [PSSpecifier preferenceSpecifierNamed:@"启用"
+                                                          target:self
+                                                             set:@selector(setPreferenceValue:specifier:)
+                                                             get:@selector(readPreferenceValue:)
+                                                          detail:Nil
+                                                            cell:PSSwitchCell
+                                                            edit:Nil];
+    [tweakEnabledSpecifier setProperty:USER_DEFAULTS_DOMAIN forKey:@"defaults"];
+    [tweakEnabledSpecifier setProperty:TWEAK_SPECIFIER_KEY forKey:@"key"];
 
+    biometricsSpecifier = [PSSpecifier preferenceSpecifierNamed:@"生物识别"
+                                                       target:self
+                                                          set:@selector(setPreferenceValue:specifier:)
+                                                          get:@selector(readPreferenceValue:)
+                                                       detail:Nil
+                                                         cell:PSSwitchCell
+                                                         edit:Nil];
+    [biometricsSpecifier setProperty:USER_DEFAULTS_DOMAIN forKey:@"defaults"];
+    [biometricsSpecifier setProperty:BIOMETRICS_SPECIFIER_KEY forKey:@"key"];
+    [biometricsSpecifier setProperty:@YES forKey:@"default"];
 
-	biometricsSpecifier = [PSSpecifier preferenceSpecifierNamed:@"生物识别"
-									target:self
-									set:@selector(setPreferenceValue:specifier:)
-									get:@selector(readPreferenceValue:)
-									detail:Nil
-									cell:PSSwitchCell
-									edit:Nil];
-	[biometricsSpecifier setProperty:USER_DEFAULTS_DOMAIN forKey:@"defaults"];
-	[biometricsSpecifier setProperty:BIOMETRICS_SPECIFIER_KEY forKey:@"key"];
-	[biometricsSpecifier setProperty:@YES forKey:@"default"];
-
-	passcodeSpecifier = [PSSpecifier preferenceSpecifierNamed:@"密码"
-									target:self
-									set:@selector(setPreferenceValue:specifier:)
-									get:@selector(readPreferenceValue:)
-									detail:Nil
-									cell:PSSwitchCell
-									edit:Nil];
-	[passcodeSpecifier setProperty:USER_DEFAULTS_DOMAIN forKey:@"defaults"];
-	[passcodeSpecifier setProperty:PASSCODE_SPECIFIER_KEY forKey:@"key"];
-	[passcodeSpecifier setProperty:@NO forKey:@"default"];
-	
-
+    passcodeSpecifier = [PSSpecifier preferenceSpecifierNamed:@"密码"
+                                                     target:self
+                                                        set:@selector(setPreferenceValue:specifier:)
+                                                        get:@selector(readPreferenceValue:)
+                                                     detail:Nil
+                                                       cell:PSSwitchCell
+                                                       edit:Nil];
+    [passcodeSpecifier setProperty:USER_DEFAULTS_DOMAIN forKey:@"defaults"];
+    [passcodeSpecifier setProperty:PASSCODE_SPECIFIER_KEY forKey:@"key"];
+    [passcodeSpecifier setProperty:@NO forKey:@"default"];
 }
 
--(void)ifAbsentInsertSpecifier:(PSSpecifier*)specifier atIndex:(int)index {
-	NSUInteger containsSpecifier = [_specifiers indexOfObjectIdenticalTo:specifier];
-	if (containsSpecifier == NSNotFound) {
-		[_specifiers insertObject:specifier atIndex:index]; 
-	}
+//MARK: 应用列表
+
+-(NSArray *)sortedApplications:(BOOL)systemApps {
+    LSApplicationWorkspace *workspace = [LSApplicationWorkspace defaultWorkspace];
+    NSArray *all = [workspace allInstalledApplications];
+    NSMutableArray *result = [NSMutableArray array];
+
+    for(LSApplicationProxy *proxy in all) {
+        NSString *identifier = proxy.bundleIdentifier;
+        if(!identifier.length) continue;
+        if([identifier hasPrefix:@"com.apple.WebKit"]) continue;
+
+        BOOL isSystem = [proxy.applicationType isEqualToString:@"System"];
+        if(isSystem != systemApps) continue;
+
+        NSString *name = proxy.localizedName;
+        if(!name.length) continue;
+        if([proxy.appTags containsObject:@"hidden"]) continue;
+
+        [result addObject:proxy];
+    }
+
+    [result sortUsingComparator:^NSComparisonResult(LSApplicationProxy *a, LSApplicationProxy *b) {
+        NSString *nameA = a.localizedName.length ? a.localizedName : a.bundleIdentifier;
+        NSString *nameB = b.localizedName.length ? b.localizedName : b.bundleIdentifier;
+        return [nameA localizedCaseInsensitiveCompare:nameB];
+    }];
+
+    return result;
 }
+
+-(NSMutableArray *)appGroupWithTitle:(NSString *)title footer:(NSString *)footer systemApps:(BOOL)systemApps {
+    NSMutableArray *group = [NSMutableArray array];
+
+    PSSpecifier *header = [PSSpecifier preferenceSpecifierNamed:title
+                                                        target:self
+                                                           set:nil
+                                                           get:nil
+                                                        detail:Nil
+                                                          cell:PSGroupCell
+                                                          edit:Nil];
+    if(footer) [header setProperty:footer forKey:@"footerText"];
+    [group addObject:header];
+
+    for(LSApplicationProxy *proxy in [self sortedApplications:systemApps]) {
+        NSString *display = proxy.localizedName.length ? proxy.localizedName : proxy.bundleIdentifier;
+        PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:display
+                                                          target:self
+                                                             set:@selector(setAppLocked:specifier:)
+                                                             get:@selector(isAppLocked:)
+                                                          detail:Nil
+                                                            cell:PSSwitchCell
+                                                            edit:Nil];
+        [spec setProperty:proxy.bundleIdentifier forKey:@"bundleID"];
+        [spec setProperty:@NO forKey:@"default"];
+        [group addObject:spec];
+    }
+
+    return group;
+}
+
+//MARK: 勾选状态读写
+
+-(NSArray *)lockedBundleIDs {
+    NSDictionary *bundleDefaults = [[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN_IS_ENABLED];
+    NSArray *locked = bundleDefaults[BUNDLE_DEFAULTS_IS_ENABLED_KEY];
+    return [locked isKindOfClass:[NSArray class]] ? locked : @[];
+}
+
+-(void)saveLockedBundleIDs:(NSArray *)locked {
+    NSMutableDictionary *bundleDefaults = [[[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN_IS_ENABLED] mutableCopy];
+    if(!bundleDefaults) bundleDefaults = [NSMutableDictionary dictionary];
+    bundleDefaults[BUNDLE_DEFAULTS_IS_ENABLED_KEY] = locked;
+    [[NSUserDefaults standardUserDefaults] setPersistentDomain:bundleDefaults forName:USER_DEFAULTS_DOMAIN_IS_ENABLED];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+-(id)isAppLocked:(PSSpecifier *)specifier {
+    NSString *bundleID = [specifier propertyForKey:@"bundleID"];
+    if(!bundleID) return @NO;
+    return @([[self lockedBundleIDs] containsObject:bundleID]);
+}
+
+-(void)setAppLocked:(id)value specifier:(PSSpecifier *)specifier {
+    NSString *bundleID = [specifier propertyForKey:@"bundleID"];
+    if(!bundleID) return;
+
+    NSMutableArray *locked = [[self lockedBundleIDs] mutableCopy];
+    if([value boolValue]) {
+        if(![locked containsObject:bundleID]) [locked addObject:bundleID];
+    } else {
+        [locked removeObject:bundleID];
+    }
+    [self saveLockedBundleIDs:locked];
+}
+
+//MARK: specifiers
 
 - (NSMutableArray *)specifiers {
-	
-	_specifiers = [super specifiers]; //call super method to add all app specefiers via altlist
+    if(!_specifiers) {
+        NSMutableArray *all = [NSMutableArray array];
+        [all addObject:tweakEnabledSpecifier];
+        [all addObject:biometricsSpecifier];
+        [all addObject:passcodeSpecifier];
 
-	// NSLog(@"_specifiers array before: %@", _specifiers);
-	
-	[self ifAbsentInsertSpecifier:tweakEnabledSpecifier atIndex:0];
-	[self ifAbsentInsertSpecifier:biometricsSpecifier atIndex:1];
-	[self ifAbsentInsertSpecifier:passcodeSpecifier atIndex:2];
-	// NSLog(@"_specifiers array after: %@", _specifiers);
-	
-	// NSLog(@"specefiers method called: %p, is in _specefiers array: %lu", &tweakEnabledSpecifier, containsTweakEnabledSpecifier);
-	return _specifiers;
+        [all addObjectsFromArray:[self appGroupWithTitle:@"用户应用"
+                                                 footer:@"勾选后，打开该 App 需要先验证身份"
+                                             systemApps:NO]];
+        [all addObjectsFromArray:[self appGroupWithTitle:@"系统应用"
+                                                 footer:nil
+                                             systemApps:YES]];
+
+        _specifiers = all;
+    }
+    return _specifiers;
 }
 
--(void)viewDidLoad {
-	NSLog(@"hello for viewDidLoad");
-	NSLog(@"the cellType: %ld", biometricsSpecifier.cellType);
-
-	//run the original viewDidLoad			
-	[super viewDidLoad];	
-
-	myTableView = [self table];
-
-	NSLog(@"the tableView: %@", myTableView);
-	NSDictionary *bundleDefaults = [[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN];
-	NSLog(@"current bundleDefaults: %@", bundleDefaults);
-
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    myTableView = [self table];
 }
 
-//MARK: UIAdaptivePresentationControllerDelegate methods
+//MARK: UIAdaptivePresentationControllerDelegate
 
 - (void)presentationControllerDidDismiss:(UIPresentationController *)presentationController {
-    NSLog(@"presentation controller dismissed by user");
-	[self userDismissedPasscodeVC];
+    [self userDismissedPasscodeVC];
 }
-
 
 //MARK: helper methods
 
 -(void)userDismissedPasscodeVC {
-	//the user slid down modal view, the password is not saved so switch of passcode
-	[passcodeSwitchControl setOn:false animated:true];
-	[self passcodeSwitchChanged:nil];
+    [passcodeSwitchControl setOn:false animated:true];
+    [self passcodeSwitchChanged:nil];
 }
 
 -(void)presentPasswordViewController {
-	PasswordViewController *passwordVC = [[PasswordViewController alloc] init];
-	passwordVC.presentationController.delegate = self;
-	[self presentViewController:passwordVC animated:true completion:nil];
-}
-
-//not in use rn
--(void)setupSwitchSettings {
-	//this runs after the PSListController settings and overrides it. I'm not sure what function is being used
-	//to save the settings of enabled,biometrics, passcode switches
-
-	NSDictionary *bundleDefaults = [[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN];
-	NSLog(@"current bundleDefaults: %@", bundleDefaults);
-
-	// BOOL isTweakEnabled = bundleDefaults[TWEAK_SPECIFIER_KEY];
-	// BOOL isBiometricsEnabled = bundleDefaults[BIOMETRICS_SPECIFIER_KEY];
-	// BOOL isPasscodeEnabled = bundleDefaults[PASSCODE_SPECIFIER_KEY];
+    PasswordViewController *passwordVC = [[PasswordViewController alloc] init];
+    passwordVC.presentationController.delegate = self;
+    [self presentViewController:passwordVC animated:true completion:nil];
 }
 
 -(void)isEnabledSwitchChanged:(id)sender {
-	NSLog(@"isEnabledSwitchChanged action called");
+    UISwitch *isEnabledSwitch = (UISwitch *)sender;
 
-	UISwitch *isEnabledSwitch = (UISwitch*)sender;
+    PSSwitchTableCell *biometricsSwitchCell = (PSSwitchTableCell *)[myTableView cellForRowAtIndexPath:BIOMETRIC_CELL_INDEXPATH];
+    UISwitch *biometricsSwitchControl = (UISwitch *)[biometricsSwitchCell control];
 
-    PSSwitchTableCell *biometricsSwitchCell = (PSSwitchTableCell*)[myTableView cellForRowAtIndexPath:BIOMETRIC_CELL_INDEXPATH];
-	UISwitch *biometricsSwitchControl = (UISwitch*)[biometricsSwitchCell control];
+    PSSwitchTableCell *passcodeSwitchCell = (PSSwitchTableCell *)[myTableView cellForRowAtIndexPath:PASSCODE_CELL_INDEXPATH];
+    UISwitch *passcodeSwitchControl = (UISwitch *)[passcodeSwitchCell control];
 
-	PSSwitchTableCell *passcodeSwitchCell = (PSSwitchTableCell*)[myTableView cellForRowAtIndexPath:PASSCODE_CELL_INDEXPATH];
-	UISwitch *passcodeSwitchControl = (UISwitch*)[passcodeSwitchCell control];
-
-   if (isEnabledSwitch.on == true) {
-	[[NSUserDefaults standardUserDefaults] setPersistentDomain:@{TWEAK_SPECIFIER_KEY:@1,
-																BIOMETRICS_SPECIFIER_KEY:@1, 
-																PASSCODE_SPECIFIER_KEY:@0}
-													forName:USER_DEFAULTS_DOMAIN];
-	[biometricsSwitchControl setOn:true animated:true]; //set biometrics on by default
-	[passcodeSwitchControl setOn:false animated:true];
-   } else {
-	[[NSUserDefaults standardUserDefaults] setPersistentDomain:@{TWEAK_SPECIFIER_KEY:@0,
-																BIOMETRICS_SPECIFIER_KEY:@0, 
-																PASSCODE_SPECIFIER_KEY:@0}
-													forName:USER_DEFAULTS_DOMAIN];
-	[passcodeSwitchControl setOn:false animated:true];
-	[biometricsSwitchControl setOn:false animated:true];
-   }
-
-	NSDictionary *bundleDefaults = [[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN];
-	NSLog(@"current bundleDefaults: %@", bundleDefaults);
-	
+    if(isEnabledSwitch.on == true) {
+        [[NSUserDefaults standardUserDefaults] setPersistentDomain:@{TWEAK_SPECIFIER_KEY:@1,
+                                                                    BIOMETRICS_SPECIFIER_KEY:@1,
+                                                                    PASSCODE_SPECIFIER_KEY:@0}
+                                                          forName:USER_DEFAULTS_DOMAIN];
+        [biometricsSwitchControl setOn:true animated:true];
+        [passcodeSwitchControl setOn:false animated:true];
+    } else {
+        [[NSUserDefaults standardUserDefaults] setPersistentDomain:@{TWEAK_SPECIFIER_KEY:@0,
+                                                                    BIOMETRICS_SPECIFIER_KEY:@0,
+                                                                    PASSCODE_SPECIFIER_KEY:@0}
+                                                          forName:USER_DEFAULTS_DOMAIN];
+        [passcodeSwitchControl setOn:false animated:true];
+        [biometricsSwitchControl setOn:false animated:true];
+    }
 }
 
 -(void)biometricsSwitchChanged:(id)sender {
-	NSLog(@"biometricsSwitchChanged action called");
-	UISwitch *biomentricsSwitch = (UISwitch*)sender;
+    UISwitch *biometricsSwitch = (UISwitch *)sender;
 
-    PSSwitchTableCell *passcodeSwitchCell = (PSSwitchTableCell*)[myTableView cellForRowAtIndexPath:PASSCODE_CELL_INDEXPATH];
-	UISwitch *passcodeSwitchControl = (UISwitch*)[passcodeSwitchCell control];
-   
-   if (biomentricsSwitch.on == true) {
-	[[NSUserDefaults standardUserDefaults] setPersistentDomain:@{TWEAK_SPECIFIER_KEY:@1,
-																BIOMETRICS_SPECIFIER_KEY:@1, 
-																PASSCODE_SPECIFIER_KEY:@0}
-                   							 forName:USER_DEFAULTS_DOMAIN];
-	[passcodeSwitchControl setOn:false animated:true];
+    PSSwitchTableCell *passcodeSwitchCell = (PSSwitchTableCell *)[myTableView cellForRowAtIndexPath:PASSCODE_CELL_INDEXPATH];
+    UISwitch *passcodeSwitchControl = (UISwitch *)[passcodeSwitchCell control];
 
-   } else {
-	[[NSUserDefaults standardUserDefaults] setPersistentDomain:@{TWEAK_SPECIFIER_KEY:@1, 
-																BIOMETRICS_SPECIFIER_KEY:@0, 
-																PASSCODE_SPECIFIER_KEY:@1}
-                    						forName:USER_DEFAULTS_DOMAIN];
-	[passcodeSwitchControl setOn:true animated:true];
-	//when switching biometrics off and passcode on present PasswordViewController
-	[self presentPasswordViewController];
-   }
+    if(biometricsSwitch.on == true) {
+        [[NSUserDefaults standardUserDefaults] setPersistentDomain:@{TWEAK_SPECIFIER_KEY:@1,
+                                                                    BIOMETRICS_SPECIFIER_KEY:@1,
+                                                                    PASSCODE_SPECIFIER_KEY:@0}
+                                                          forName:USER_DEFAULTS_DOMAIN];
+        [passcodeSwitchControl setOn:false animated:true];
+    } else {
+        [[NSUserDefaults standardUserDefaults] setPersistentDomain:@{TWEAK_SPECIFIER_KEY:@1,
+                                                                    BIOMETRICS_SPECIFIER_KEY:@0,
+                                                                    PASSCODE_SPECIFIER_KEY:@1}
+                                                          forName:USER_DEFAULTS_DOMAIN];
+        [passcodeSwitchControl setOn:true animated:true];
+        [self presentPasswordViewController];
+    }
 
-	//turn on isEnabled cell too 
-	PSSwitchTableCell *isEnabledSwitchCell = (PSSwitchTableCell*)[myTableView cellForRowAtIndexPath:IS_ENABLED_CELL_INDEXPATH];
-	UISwitch *isEnabledSwitchControl = (UISwitch*)[isEnabledSwitchCell control];
-	[isEnabledSwitchControl setOn:true animated:true];
-
-	NSDictionary *bundleDefaults = [[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN];
-	NSLog(@"current bundleDefaults: %@", bundleDefaults);
+    PSSwitchTableCell *isEnabledSwitchCell = (PSSwitchTableCell *)[myTableView cellForRowAtIndexPath:IS_ENABLED_CELL_INDEXPATH];
+    UISwitch *isEnabledSwitchControl = (UISwitch *)[isEnabledSwitchCell control];
+    [isEnabledSwitchControl setOn:true animated:true];
 }
 
 -(void)passcodeSwitchChanged:(id)sender {
-	NSLog(@"passcodeSwitchChanged action called");
+    UISwitch *passcodeSwitch = (UISwitch *)sender;
 
-	UISwitch *passcodeSwitch = (UISwitch*)sender;
+    PSSwitchTableCell *biometricsSwitchCell = (PSSwitchTableCell *)[myTableView cellForRowAtIndexPath:BIOMETRIC_CELL_INDEXPATH];
+    UISwitch *biometricsSwitchControl = (UISwitch *)[biometricsSwitchCell control];
 
-    PSSwitchTableCell *biometricsSwitchCell = (PSSwitchTableCell*)[myTableView cellForRowAtIndexPath:BIOMETRIC_CELL_INDEXPATH];
-	UISwitch *biometricsSwitchControl = (UISwitch*)[biometricsSwitchCell control];
-   
-   if (passcodeSwitch.on == true) {
-	[[NSUserDefaults standardUserDefaults] setPersistentDomain:@{TWEAK_SPECIFIER_KEY:@1,
-																BIOMETRICS_SPECIFIER_KEY:@0, 
-																PASSCODE_SPECIFIER_KEY:@1}
-                   							 forName:USER_DEFAULTS_DOMAIN];
-	[biometricsSwitchControl setOn:false animated:true];
+    if(passcodeSwitch.on == true) {
+        [[NSUserDefaults standardUserDefaults] setPersistentDomain:@{TWEAK_SPECIFIER_KEY:@1,
+                                                                    BIOMETRICS_SPECIFIER_KEY:@0,
+                                                                    PASSCODE_SPECIFIER_KEY:@1}
+                                                          forName:USER_DEFAULTS_DOMAIN];
+        [biometricsSwitchControl setOn:false animated:true];
+        [self presentPasswordViewController];
+    } else {
+        [[NSUserDefaults standardUserDefaults] setPersistentDomain:@{TWEAK_SPECIFIER_KEY:@1,
+                                                                    BIOMETRICS_SPECIFIER_KEY:@1,
+                                                                    PASSCODE_SPECIFIER_KEY:@0}
+                                                          forName:USER_DEFAULTS_DOMAIN];
+        [biometricsSwitchControl setOn:true animated:true];
+    }
 
-	[self presentPasswordViewController];
-   } else {
-	[[NSUserDefaults standardUserDefaults] setPersistentDomain:@{TWEAK_SPECIFIER_KEY:@1, 
-																BIOMETRICS_SPECIFIER_KEY:@1, 
-																PASSCODE_SPECIFIER_KEY:@0}
-                    						forName:USER_DEFAULTS_DOMAIN];
-	[biometricsSwitchControl setOn:true animated:true];
-   }
-
-	//turn on isEnabled cell too 
-	PSSwitchTableCell *isEnabledSwitchCell = (PSSwitchTableCell*)[myTableView cellForRowAtIndexPath:IS_ENABLED_CELL_INDEXPATH];
-	UISwitch *isEnabledSwitchControl = (UISwitch*)[isEnabledSwitchCell control];
-	[isEnabledSwitchControl setOn:true animated:true];
-
-	NSDictionary *bundleDefaults = [[NSUserDefaults standardUserDefaults] persistentDomainForName:USER_DEFAULTS_DOMAIN];
-	NSLog(@"current bundleDefaults: %@", bundleDefaults);
+    PSSwitchTableCell *isEnabledSwitchCell = (PSSwitchTableCell *)[myTableView cellForRowAtIndexPath:IS_ENABLED_CELL_INDEXPATH];
+    UISwitch *isEnabledSwitchControl = (UISwitch *)[isEnabledSwitchCell control];
+    [isEnabledSwitchControl setOn:true animated:true];
 }
-
 
 //MARK: tableView delegate
 
-- (void)tableView:(UITableView *)tableView 
-  willDisplayCell:(UITableViewCell *)cell 
+- (void)tableView:(UITableView *)tableView
+  willDisplayCell:(UITableViewCell *)cell
 forRowAtIndexPath:(NSIndexPath *)indexPath {
 
-	if ([indexPath compare:IS_ENABLED_CELL_INDEXPATH] == NSOrderedSame) {
-		PSSwitchTableCell *isEnabledSwitchCell = (PSSwitchTableCell*)cell;
+    if([indexPath compare:IS_ENABLED_CELL_INDEXPATH] == NSOrderedSame) {
+        PSSwitchTableCell *isEnabledSwitchCell = (PSSwitchTableCell *)cell;
+        isEnabledSwitchControl = (UISwitch *)[isEnabledSwitchCell control];
+        [isEnabledSwitchControl addTarget:self
+                                   action:@selector(isEnabledSwitchChanged:)
+                         forControlEvents:UIControlEventValueChanged];
+    }
 
-		isEnabledSwitchControl = (UISwitch*)[isEnabledSwitchCell control];
-		[isEnabledSwitchControl addTarget:self 
-									action:@selector(isEnabledSwitchChanged:) 
-							forControlEvents:UIControlEventValueChanged]; 
+    if([indexPath compare:BIOMETRIC_CELL_INDEXPATH] == NSOrderedSame) {
+        PSSwitchTableCell *biometricsSwitchCell = (PSSwitchTableCell *)cell;
+        biometricsSwitchControl = (UISwitch *)[biometricsSwitchCell control];
+        [biometricsSwitchControl addTarget:self
+                                    action:@selector(biometricsSwitchChanged:)
+                          forControlEvents:UIControlEventValueChanged];
+    }
 
-
-	}
-
-	if ([indexPath compare:BIOMETRIC_CELL_INDEXPATH] == NSOrderedSame) {
-		PSSwitchTableCell *biometricsSwitchCell = (PSSwitchTableCell*)cell;
-
-		biometricsSwitchControl = (UISwitch*)[biometricsSwitchCell control];
-		[biometricsSwitchControl addTarget:self 
-									action:@selector(biometricsSwitchChanged:) 
-							forControlEvents:UIControlEventValueChanged]; 
-
-	}
-
-	if ([indexPath compare:PASSCODE_CELL_INDEXPATH] == NSOrderedSame) {
-		PSSwitchTableCell *passcodeSwitchCell = (PSSwitchTableCell*)cell;
-
-		passcodeSwitchControl = (UISwitch*)[passcodeSwitchCell control];
-		[passcodeSwitchControl addTarget:self 
-									action:@selector(passcodeSwitchChanged:) 
-							forControlEvents:UIControlEventValueChanged];
-
-	}
-
-	
+    if([indexPath compare:PASSCODE_CELL_INDEXPATH] == NSOrderedSame) {
+        PSSwitchTableCell *passcodeSwitchCell = (PSSwitchTableCell *)cell;
+        passcodeSwitchControl = (UISwitch *)[passcodeSwitchCell control];
+        [passcodeSwitchControl addTarget:self
+                                  action:@selector(passcodeSwitchChanged:)
+                        forControlEvents:UIControlEventValueChanged];
+    }
 }
 
 @end

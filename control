@@ -6,4 +6,4 @@ Description: 用生物识别或密码锁定指定 App，RootHide / iOS 17 适配
 Maintainer: fan
 Author: AT5HK (original), ported by fan
 Section: Tweaks
-Depends: mobilesubstrate, preferenceloader, firmware (>= 15.0), com.opa334.altlist
+Depends: mobilesubstrate, preferenceloader, firmware (>= 15.0)

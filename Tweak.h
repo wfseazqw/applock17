@@ -1,6 +1,5 @@
 
 #import <UIKit/UIKit.h>
-#import <AltList/LSApplicationProxy+AltList.h>
 // #import <MobileCoreServices/LSApplicationWorkspace.h> ios 12 uses MobileCoreServices
 #import <MobileCoreServices/LSApplicationWorkspace.h> //ios 15 uses CoreServices in public frameworks
 #import <LocalAuthentication/LocalAuthentication.h>

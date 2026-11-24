@@ -7,14 +7,14 @@
 ## 与原版的差异
 
 - 构建目标改为 `iphone:clang:16.5:15.0`、`ARCHS = arm64e`、`THEOS_PACKAGE_SCHEME = roothide`
-- 去掉编译期对 AltList 框架的依赖：AltList 头文件 vendor 到 `vendor/AltList/`，编译用 `-idirafter`，运行时依赖设备上安装的 `com.opa334.altlist`
+- 不再依赖 AltList 框架：设置面板自己枚举已安装 App 生成列表（原版用 AltList 的多选控制器，在 RootHide 下会因框架未加载导致面板打不开）
 - 补了 `vendor/MobileCoreServices` 的最小声明，避免依赖 SDK 私有头
 - PreferenceLoader 入口 plist 移到根 `layout/`，确保随包安装
 - 设置界面与提示文案汉化
 
 ## 依赖
 
-设备需安装 `com.opa334.altlist`（AltList）。本包 `Depends` 里已声明。
+无第三方依赖，也不需要 AltList。
 
 ## 构建
 

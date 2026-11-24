@@ -251,18 +251,9 @@ static void APLRespringNotificationCallback(CFNotificationCenterRef center,
          }
       });
 
-      // 每 60 秒补一次：新装的 App 不用注销、不用重打包也会自动出现在状态里
-      // （只在 SpringBoard 自己的定时器里跑，绝不挂在 App 启动流程上）
-      NSTimer *syncTimer = [NSTimer scheduledTimerWithTimeInterval:60.0
-                                                          repeats:YES
-                                                            block:^(NSTimer *timer) {
-         @try {
-            APLSyncAppStateFiles();
-         } @catch (NSException *exception) {
-            NSLog(@"[AppLock] 定时同步出错：%@", exception);
-         }
-      }];
-      (void)syncTimer;
+      // 不再挂定时器巡检：状态只在三个明确时机写一次——
+      // SpringBoard 启动/注销后、设置页勾选变化时（设置页会发 listchanged 通知）。
+      // 平时不占任何后台资源。
    }
  }
 

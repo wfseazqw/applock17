@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <LocalAuthentication/LocalAuthentication.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 
 // 应用锁 —— 多任务（App 切换器）点击卡片时的二次验证
 // 说明：验证放在 SpringBoard 里做。SpringBoard 是系统进程，面容识别可用；
@@ -15,7 +16,10 @@ static id APLLayoutForContainer(id switcher, id container) {
         id layouts = [switcher valueForKey:@"appLayouts"];
         if (layouts == nil) return nil;
         for (id layout in layouts) {
-            id candidate = [switcher performSelector:NSSelectorFromString(@"_itemContainerForAppLayoutIfExists:") withObject:layout];
+            SEL selector = NSSelectorFromString(@"_itemContainerForAppLayoutIfExists:");
+            if (![switcher respondsToSelector:selector]) return nil;
+            id (*sendId)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
+            id candidate = sendId(switcher, selector, layout);
             if (candidate == container) {
                 return layout;
             }
@@ -28,8 +32,10 @@ static id APLLayoutForContainer(id switcher, id container) {
 static BOOL APLLayoutIsLocked(id layout) {
     if (layout == nil) return NO;
     @try {
-        id result = [layout performSelector:NSSelectorFromString(@"containsItemWithBundleIdentifier:")
-                                 withObject:APLLockedBundleIdentifier];
+        SEL selector = NSSelectorFromString(@"containsItemWithBundleIdentifier:");
+        if (![layout respondsToSelector:selector]) return NO;
+        id (*sendId)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
+        id result = sendId(layout, selector, APLLockedBundleIdentifier);
         if (result != nil) {
             return [result boolValue];
         }
@@ -67,9 +73,9 @@ static void APLAuthenticateThen(void (^onSuccess)(void)) {
         return;
     }
 
-    id target = self;
+    id target = (id)self;
     SEL selector = _cmd;
-    IMP implementation = [self methodForSelector:selector];
+    IMP implementation = [target methodForSelector:selector];
 
     APLAuthenticateThen(^{
         if (implementation != NULL && target != nil) {
